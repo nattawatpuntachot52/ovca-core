@@ -1,0 +1,28 @@
+[package]
+name = "ovca-brain"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Oracle brain cache - in-memory index, permission matrix, search, read/write"
+
+[dependencies]
+ovca-types   = { path = "../ovca-types" }
+ovca-storage = { path = "../ovca-storage" }
+tokio          = { workspace = true }
+serde_json     = { workspace = true }
+chrono         = { workspace = true }
+uuid           = { workspace = true }
+regex          = { workspace = true }
+anyhow         = { workspace = true }
+dashmap        = { workspace = true }
+tracing        = { workspace = true }
+reqwest        = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["full"] }
+axum     = { workspace = true }

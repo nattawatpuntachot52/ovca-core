@@ -1,0 +1,29 @@
+[package]
+name = "ovca-mcp"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Oracle MCP base server - Axum router factory, SSE, and response normalization"
+
+[dependencies]
+ovca-types         = { path = "../ovca-types" }
+ovca-observability = { path = "../ovca-observability" }
+tokio                = { workspace = true }
+tokio-stream         = { workspace = true, features = ["sync"] }
+futures-util         = { workspace = true }
+axum                 = { workspace = true }
+tower                = { workspace = true }
+tower-http           = { workspace = true }
+serde                = { workspace = true }
+serde_json           = { workspace = true }
+anyhow               = { workspace = true }
+tracing              = { workspace = true }
+
+[dev-dependencies]
+tempfile            = { workspace = true }
+tokio               = { workspace = true, features = ["full"] }
+tracing-subscriber  = { workspace = true }

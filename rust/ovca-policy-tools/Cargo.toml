@@ -1,0 +1,25 @@
+[package]
+name = "ovca-policy-tools"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Coordinator Governance Toolkit - 12 policy tools across three tiers"
+
+[dependencies]
+anyhow       = { workspace = true }
+axum         = { workspace = true }
+chrono       = { workspace = true }
+dotenvy      = { workspace = true }
+futures-util = { workspace = true }
+ovca-mcp     = { path = "../ovca-mcp" }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+tokio        = { workspace = true }
+tracing      = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true }

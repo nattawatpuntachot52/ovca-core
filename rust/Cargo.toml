@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+  "ovca-types",
+  "ovca-storage",
+  "ovca-observability",
+  "ovca-mcp",
+  "ovca-llm-client",
+  "ovca-brain",
+  "ovca-runtime-core",
+  "ovca-langgraph",
+  "ovca-policy-tools",
+  "ovca-coordinator-server",
+  "ovca-engineer-server",
+  "ovca-reviewer-server",
+  "ovca-auditor-server",
+]
+
+[workspace.package]
+authors = ["OVCA Contributors"]
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/nattawatpuntachot52/ovca-core"
+rust-version = "1.85"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+futures-util = "0.3"
+axum = { version = "0.7", features = ["tokio"] }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+regex = "1"
+anyhow = "1"
+thiserror = "1"
+dotenvy = "0.15"
+dashmap = "5"
+rusqlite = { version = "0.31", features = ["bundled"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tempfile = "3"

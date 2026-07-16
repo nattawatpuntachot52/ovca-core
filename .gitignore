@@ -1,0 +1,13 @@
+/rust/target/
+/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+*.log
+*.pid
+/logs/
+/run/
+/.vs/
+/.vscode/
+.DS_Store

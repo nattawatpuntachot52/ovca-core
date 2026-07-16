@@ -1,0 +1,22 @@
+[package]
+name = "ovca-runtime-core"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Oracle runtime - agent profiles, intent classifier, and event emitter"
+
+[dependencies]
+ovca-types   = { path = "../ovca-types" }
+ovca-storage = { path = "../ovca-storage" }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+chrono         = { workspace = true }
+regex          = { workspace = true }
+anyhow         = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

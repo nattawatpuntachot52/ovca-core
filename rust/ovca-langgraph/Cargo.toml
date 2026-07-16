@@ -1,0 +1,29 @@
+[package]
+name = "ovca-langgraph"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Oracle state machine - intake, route, specialist, grade, rewrite, synthesize"
+
+[dependencies]
+ovca-types      = { path = "../ovca-types" }
+ovca-brain      = { path = "../ovca-brain" }
+ovca-llm-client = { path = "../ovca-llm-client" }
+ovca-runtime-core = { path = "../ovca-runtime-core" }
+ovca-storage    = { path = "../ovca-storage" }
+tokio             = { workspace = true }
+serde             = { workspace = true }
+serde_json        = { workspace = true }
+chrono            = { workspace = true }
+uuid              = { workspace = true }
+regex             = { workspace = true }
+anyhow            = { workspace = true }
+tracing           = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["full"] }

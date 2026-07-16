@@ -1,0 +1,31 @@
+[package]
+name = "ovca-coordinator-server"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Oracle Coordinator MCP server binary - active port 18780"
+
+[[bin]]
+name = "ovca-coordinator-server"
+path = "src/main.rs"
+
+[dependencies]
+ovca-types      = { path = "../ovca-types" }
+ovca-storage    = { path = "../ovca-storage" }
+ovca-mcp        = { path = "../ovca-mcp" }
+ovca-llm-client = { path = "../ovca-llm-client" }
+axum              = { workspace = true }
+tokio             = { workspace = true }
+serde_json        = { workspace = true }
+anyhow            = { workspace = true }
+dotenvy           = { workspace = true }
+tracing           = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid              = { workspace = true }
+
+[dev-dependencies]
+tempfile          = { workspace = true }

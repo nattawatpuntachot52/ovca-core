@@ -1,0 +1,7 @@
+{
+  "name": "sati_check",
+  "arguments": {
+    "action": "describe the intended change",
+    "context": "state the authority and expected side effects"
+  }
+}
