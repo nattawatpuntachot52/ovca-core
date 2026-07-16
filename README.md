@@ -16,6 +16,28 @@ See [architecture](docs/architecture.md), [Policy Tools authority](docs/policy-t
 [security boundary](docs/security-boundary.md), [dependency lock change](docs/dependency-lock-change.md),
 and [limitations](docs/limitations.md).
 
+## How it works
+
+```mermaid
+flowchart LR
+    Operator["Operator"] --> Startup["Local startup script"]
+    Startup --> Services["Five loopback MCP services"]
+    Client["Local client"] --> Tools["Health, discovery, and tool calls"]
+    Tools --> Services
+    Services --> Data["External operational data"]
+    App["Optional embedding application"] -.-> Graph["Routing and orchestration library"]
+    Graph -.-> Services
+```
+
+The startup script runs Policy Tools plus four role services. Coordinator can
+classify intake, create queued task packets, and aggregate specialist status.
+Engineer, Reviewer, and Auditor expose evidence-oriented tools over the shared MCP
+transport. The orchestration, brain, and runtime-guard crates are reusable library
+paths and are not launched automatically.
+
+Read the [workflow-by-workflow system guide](docs/system-workflows.md) for inputs,
+outputs, failure states, evidence files, and a flowchart for each workflow.
+
 ## Prerequisites
 
 - Windows PowerShell 5.1 or PowerShell 7
