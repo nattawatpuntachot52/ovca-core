@@ -12,9 +12,9 @@ keeps operational data outside the source tree.
 - Auditor: cross-audit and risk review (`18786`)
 - Policy Tools: twelve shared Rust/Python policy tools (`8775`)
 
-See [architecture](docs/architecture.md), [Policy Tools authority](docs/policy-tools-authority.md),
-[security boundary](docs/security-boundary.md), [dependency lock change](docs/dependency-lock-change.md),
-and [limitations](docs/limitations.md).
+See [architecture](docs/architecture.md), the [goal runtime contract](docs/goal-runtime-contract.md),
+[Policy Tools authority](docs/policy-tools-authority.md), [security boundary](docs/security-boundary.md),
+[dependency lock change](docs/dependency-lock-change.md), and [limitations](docs/limitations.md).
 
 ## How it works
 
@@ -103,5 +103,12 @@ runtime callers and blocking tests prove stronger authority.
 OVCA Core is an early public development distribution. APIs and data contracts
 may change. Legacy Aurora, Divina, and Hope enum values exist only to read old
 serialized records; they are inactive, unregistered, and have no public ports.
+
+The provider-independent goal runtime version 1 contracts and transition
+validator are `contract_available` in `ovca-types`. They are not `runtime_wired`:
+the repository does not yet persist or replay these records, schedule their tasks,
+execute their roles, or expose them through a server endpoint. Explicit review
+and audit flags select whether valid completion evidence is accepted from
+`running`, `reviewing`, or `auditing`; approval alone does not select those gates.
 
 Licensed under Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

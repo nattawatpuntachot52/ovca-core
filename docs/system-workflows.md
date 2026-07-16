@@ -39,6 +39,8 @@ data, build, log, and PID roots when starting the system.
 | `HTTP-exposed` | A running service exposes the workflow through HTTP |
 | `library-only` | Source and tests exist, but the startup script does not launch it |
 | `compatibility-only` | Kept for embedding, parity, or old serialized data, not as an active public worker |
+| `contract_available` | Versioned models or pure validation are public, with no claim that a runtime consumes them |
+| `runtime_wired` | A runtime component consumes the contract to drive behavior; the P0 goal runtime does not have this status |
 
 ## 3. Whole-system view
 
@@ -67,6 +69,7 @@ flowchart TD
     Auditor --> ExternalData
 
     EmbeddingApp["Optional embedding application"] -.-> Graph["LangGraph-style library"]
+    EmbeddingApp -.-> GoalContracts["Goal runtime contracts: contract_available"]
     Graph -.-> Coordinator
     Graph -.-> Engineer
     Graph -.-> Reviewer
@@ -82,6 +85,7 @@ library-level integration paths that require an embedding caller.
 
 | Workflow | Runtime status | Primary result |
 |---|---|---|
+| Goal runtime contract baseline | `contract_available`, not `runtime_wired` | Versioned data models and pure validation with risk-selected running, review, or audit completion gates |
 | 1. Start the local runtime | `startup-wired` | Five owned local processes |
 | 2. Discover and call an MCP tool | `HTTP-exposed` | Normalized JSON response |
 | 3. Classify intake and choose a role | `HTTP-exposed` | Route decision, not execution |
