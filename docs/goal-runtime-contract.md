@@ -6,10 +6,12 @@ The goal runtime contract is `contract_available` in `ovca-types`. Versioned
 Rust and JSON models plus a pure run-state transition validator are available to
 embedding callers.
 
-The goal runtime is not `runtime_wired`. P0 does not persist or replay events,
-schedule tasks, lease workers, request live approvals, execute reviews or audits,
-call providers, expose server endpoints, or perform side effects. Later phases
-must consume these contracts explicitly before any of those behaviors exist.
+P1 consumes those contracts through a `runtime_wired`, library-only path. It can
+schedule tasks, append strict run events under an external root, validate an
+event chain, and deterministically replay a `RunRecord`. This is not a service:
+startup does not launch it and no HTTP endpoint exposes it. P1 also does not
+lease or execute workers, request live approvals, perform reviews or audits, call
+providers, or authorize external side effects.
 
 ## Contract version
 
@@ -66,9 +68,9 @@ version. Tagged enums are governed by the version of their containing contract.
 `PermissionProfile` carries the declared resource and write keys plus explicit
 `approval_required`, `review_required`, and `audit_required` flags. The flags are
 independent: `approval_required` alone never selects a review or audit completion
-gate. P0 neither derives these flags or authority from a tier nor approves or
-executes an action. A later risk-policy layer must select, validate, and enforce
-the profile before effects.
+gate. The contract and P1 kernel neither derive authority from a tier nor approve
+or execute an action. A later risk-policy layer must select, validate, and
+enforce the profile before effects.
 
 ## Run states
 
@@ -115,7 +117,7 @@ Failures use the serde-serializable `RunTransitionError` tagged by a stable `cod
 with fields such as `from`, `to`, `required`, `actual`, and `missing` where
 applicable.
 
-## Completion handoff for P1
+## Completion validation in P1
 
 P1 can call:
 
@@ -135,20 +137,42 @@ the actual evidence IDs and deterministic lists of satisfied acceptance,
 verification, and definition-of-done items. A configured minimum of zero is
 treated as one, so `completed` can never be evidence-free.
 
-After validation, P1 may append a `RunEvent`; P0 does not perform that mutation.
+`replay_run` applies this validator before accepting a transition to `completed`.
+Every evidence ID used by `CompletionEvidence` must already have appeared in an
+`EvidenceAttached` event. Invalid prospective events are rejected before
+`DurableGoalRuntime::append_event` writes them.
 
-## Replay readiness
+## Durable replay
 
 `RunEvent` carries a run ID, event ID, zero-based sequence, previous event ID,
-timestamp, producer role, typed payload, and sorted metadata. `RunRecord` carries
-`event_count`, `last_event_sequence`, and `last_event_id`. These fields allow a
-later durable store to detect ordering and reconstruct a snapshot, but P0 does not
-implement storage, contiguity checks, replay, snapshots, or conflict handling.
+timestamp, producer role, typed payload, and sorted metadata. P1 requires the
+first event to be one `RunCreated` event in `draft`, one run ID, contiguous
+sequences, exact previous-event links, unique event IDs, current nested contract
+versions, and a valid execution plan over declared tasks.
+
+`RunEventLog` uses the fixed relative path `run-events/events.jsonl` below a
+caller-supplied root. A transparent `RunId` is data only and is never joined into
+a filesystem path. Appends flush and sync before returning; reload is strict and
+reports malformed non-empty rows rather than skipping them.
+
+`DurableGoalRuntime` builds four caller-stamped Coordinator events through
+`planned`, validates a prospective append by replaying it in memory, persists it,
+then reloads and replays the durable bytes. `ReplayedRun` contains `RunRecord`,
+the execution plan, task statuses, completion evidence, ordered specialist
+outputs, and the optional Coordinator final response.
+
+P1 assumes one writer per run. Cross-process ownership, claim, lease,
+compare-and-swap, retry, cancellation, and idempotent crash recovery belong to
+P2. A failure between the four bootstrap appends can leave a valid partial event
+stream; P1 does not repair it automatically.
 
 ## Verification surface
 
 `ovca-types` unit tests cover transparent IDs, contract versions, serde round
-trips, deterministic event serialization, a complete valid state path, invalid
-and skipped transitions, terminal-state mutation, risk-selected completion gates,
-nested contract versions, completion evidence, definition of done, required
-criteria, and the existing public role serialization shape.
+trips, deterministic event serialization, valid and invalid transitions,
+completion gates, and required evidence. `ovca-runtime-core` tests cover golden
+scheduling, final-answer ownership, event-chain integrity, replay, and durable
+reopen equivalence. `ovca-langgraph` tests cover deterministic bootstrap,
+contract-version rejection, validate-before-append behavior, strict reload, and
+Coordinator-only final responses. See
+[durable orchestration runtime](orchestration-runtime.md) for the workflow map.

@@ -337,12 +337,70 @@ pub struct RunRecord {
     pub finished_at: Option<DateTime<Utc>>,
 }
 
+/// Whether one deterministic execution wave contains one or multiple tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    Sequential,
+    Parallel,
+}
+
+/// Tasks that may run together after their dependencies have completed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionWave {
+    /// Zero-based position in the plan.
+    pub index: u32,
+    pub mode: ExecutionMode,
+    /// Sorted task IDs make the plan stable across input ordering.
+    pub task_ids: Vec<TaskId>,
+}
+
+/// Provider-independent output of deterministic scheduling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionPlan {
+    pub contract_version: ContractVersion,
+    pub waves: Vec<ExecutionWave>,
+}
+
+/// Task-scoped output from a public specialist role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecialistOutput {
+    pub contract_version: ContractVersion,
+    pub task_id: TaskId,
+    pub specialist_role: Role,
+    pub summary: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<EvidenceId>,
+}
+
+/// Owner-facing response that only the Coordinator may finalize.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoordinatorFinalResponse {
+    pub contract_version: ContractVersion,
+    pub response: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<EvidenceId>,
+}
+
 /// Replayable event payload. Side effects are represented, never executed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RunEventPayload {
     RunCreated {
+        project_id: ProjectId,
+        goal_id: GoalId,
+        #[serde(default)]
+        task_ids: Vec<TaskId>,
         status: RunStatus,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<DateTime<Utc>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        finished_at: Option<DateTime<Utc>>,
+    },
+    ExecutionPlanRecorded {
+        plan: ExecutionPlan,
     },
     StatusTransition {
         from: RunStatus,
@@ -355,6 +413,15 @@ pub enum RunEventPayload {
     },
     EvidenceAttached {
         evidence_id: EvidenceId,
+    },
+    CompletionEvidenceRecorded {
+        evidence: CompletionEvidence,
+    },
+    SpecialistOutputRecorded {
+        output: SpecialistOutput,
+    },
+    CoordinatorFinalResponseRecorded {
+        response: CoordinatorFinalResponse,
     },
     NoteRecorded {
         message: String,

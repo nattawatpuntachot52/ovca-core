@@ -5,9 +5,11 @@
 pub mod brain;
 pub mod json;
 pub mod jsonl;
+pub mod run_events;
 pub mod sqlite;
 
 pub use brain::{list_brain_nodes, parse_brain_node, write_brain_node};
 pub use json::{read_json, write_json_atomic};
 pub use jsonl::{append_jsonl, read_jsonl, read_jsonl_tail};
+pub use run_events::{RunEventLog, RunEventLogError, RUN_EVENT_LOG_RELATIVE_PATH};
 pub use sqlite::{acquire_task_lock, open_db, release_task_lock};

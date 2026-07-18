@@ -1,4 +1,11 @@
 // oracle-langgraph — Sprint stub. See PLAN_RUST_HOTPATH.md for full contract.
+mod goal_runtime;
+
+pub use goal_runtime::{
+    build_planned_run, DurableGoalRuntime, DurableGoalRuntimeError, EventStamp, GoalRuntimeError,
+    PlannedRunStamps,
+};
+
 use anyhow::Result;
 use ovca_brain::{search, BrainCache};
 use ovca_llm_client::McpHttpClient;

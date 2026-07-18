@@ -40,7 +40,7 @@ data, build, log, and PID roots when starting the system.
 | `library-only` | Source and tests exist, but the startup script does not launch it |
 | `compatibility-only` | Kept for embedding, parity, or old serialized data, not as an active public worker |
 | `contract_available` | Versioned models or pure validation are public, with no claim that a runtime consumes them |
-| `runtime_wired` | A runtime component consumes the contract to drive behavior; the P0 goal runtime does not have this status |
+| `runtime_wired` | A runtime component consumes the contract to drive behavior; the P1 goal runtime has this status as a library path |
 
 ## 3. Whole-system view
 
@@ -69,7 +69,9 @@ flowchart TD
     Auditor --> ExternalData
 
     EmbeddingApp["Optional embedding application"] -.-> Graph["LangGraph-style library"]
-    EmbeddingApp -.-> GoalContracts["Goal runtime contracts: contract_available"]
+    EmbeddingApp -.-> GoalContracts["Goal contracts: contract_available"]
+    EmbeddingApp -.-> GoalRuntime["Durable goal runtime: library-only"]
+    GoalRuntime -.-> RunEvents["External strict run-event log"]
     Graph -.-> Coordinator
     Graph -.-> Engineer
     Graph -.-> Reviewer
@@ -85,7 +87,7 @@ library-level integration paths that require an embedding caller.
 
 | Workflow | Runtime status | Primary result |
 |---|---|---|
-| Goal runtime contract baseline | `contract_available`, not `runtime_wired` | Versioned data models and pure validation with risk-selected running, review, or audit completion gates |
+| Goal runtime contracts | `contract_available` | Versioned models and risk-selected transition validation |
 | 1. Start the local runtime | `startup-wired` | Five owned local processes |
 | 2. Discover and call an MCP tool | `HTTP-exposed` | Normalized JSON response |
 | 3. Classify intake and choose a role | `HTTP-exposed` | Route decision, not execution |
@@ -96,8 +98,9 @@ library-level integration paths that require an embedding caller.
 | 8. Aggregate team status | `HTTP-exposed` | Combined status with offline detection |
 | 9. Run a Policy Tool | `startup-wired`, `HTTP-exposed` | Structured policy result |
 | 10. Run the orchestration loop | `library-only` | Graded and synthesized response |
-| 11. Record runtime evidence and use brain context | `library-only` | JSONL events, snapshot, and retrieval context |
-| 12. Check health and stop owned processes | `startup-wired` | Health table or identity-safe shutdown |
+| 11. Create and replay a durable goal run | `runtime_wired`, `library-only` | Deterministic plan and replayed event-backed run |
+| 12. Record runtime evidence and use brain context | `library-only` | JSONL events, snapshot, and retrieval context |
+| 13. Check health and stop owned processes | `startup-wired` | Health table or identity-safe shutdown |
 
 ## 5. Workflow 1: Start the local runtime
 
@@ -500,7 +503,52 @@ the grade/rewrite loop may retry up to the configured limit.
 **Evidence:** `rust/ovca-langgraph/src/lib.rs`,
 `rust/ovca-runtime-core/src/lib.rs`, `rust/ovca-brain/src/search.rs`
 
-## 15. Workflow 11: Record runtime evidence and use brain context
+## 15. Workflow 11: Create and replay a durable goal run
+
+**Status:** `runtime_wired`, `library-only`
+
+**What it does:** Validates versioned goal and task contracts, creates a
+deterministic execution plan, writes four linked Coordinator bootstrap events to
+an external strict JSONL log, and reloads them into a `ReplayedRun` in `planned`.
+Later caller-supplied events are replayed in memory before they are appended.
+
+**Why it exists:** Planning, durable evidence, and final-answer ownership need a
+provider-independent contract before worker execution is introduced.
+
+**Inputs:** `GoalContract`, pending tasks, `RunId`, four caller-supplied event
+IDs and timestamps, and an external storage root.
+
+**Output:** An `ExecutionPlan`, durable linked events, and replayed state with
+plan, task statuses, evidence, specialist outputs, and optional Coordinator final
+response.
+
+```mermaid
+flowchart TD
+    Input["Goal, tasks, IDs, timestamps"] --> Validate["Validate versions, tasks, and stamps"]
+    Validate --> Schedule["Create deterministic waves"]
+    Schedule --> Events["Create four Coordinator bootstrap events"]
+    Events --> Replay["Prospective replay"]
+    Replay -->|"Invalid"| Reject["Reject without writing"]
+    Replay -->|"Valid"| Persist["Append, flush, and sync JSONL"]
+    Persist --> Reload["Strict reload and replay"]
+    Reload --> Planned["Return planned ReplayedRun"]
+```
+
+**Authority boundary:** Only Coordinator may record the final response. P1 does
+not execute planned waves and assumes one writer per run. Worker claim, lease,
+retry, cancellation, and write ownership belong to P2.
+
+**Failure states:** Unsupported contracts, invalid task graphs, malformed JSONL,
+broken event links, invalid transitions, unattached completion evidence, or a
+specialist final response fail explicitly. A storage error during the four
+sequential bootstrap appends can leave a replayable partial run.
+
+**Evidence:** `rust/ovca-langgraph/src/goal_runtime.rs`,
+`rust/ovca-runtime-core/src/replay.rs`,
+`rust/ovca-storage/src/run_events.rs`,
+`docs/orchestration-runtime.md`
+
+## 16. Workflow 12: Record runtime evidence and use brain context
 
 **Status:** `library-only`
 
@@ -540,7 +588,7 @@ context rather than inventing data.
 **Evidence:** `rust/ovca-runtime-core/src/lib.rs`, `rust/ovca-brain/src`,
 `rust/ovca-storage/src`
 
-## 16. Workflow 12: Check health and stop owned processes
+## 17. Workflow 13: Check health and stop owned processes
 
 **Status:** `startup-wired`
 
@@ -573,7 +621,7 @@ and `healthy: false`.
 
 **Evidence:** `scripts/ovca.ps1`, `scripts/tests/test_ovca_startup_script.py`
 
-## 17. What is verified, inferred, and unknown
+## 18. What is verified, inferred, and unknown
 
 ### Observed in source and tests
 
@@ -583,6 +631,8 @@ and `healthy: false`.
 - Coordinator routing accepts only public active role IDs.
 - Reviewer and Auditor return `unknown` when no matching evidence exists.
 - Team aggregation preserves partial responses and reports offline roles.
+- The durable goal runtime schedules, persists, and replays library-owned run
+  events while preserving Coordinator final-answer ownership.
 - The public startup does not launch the LangGraph, runtime guard, or brain
   libraries as independent services.
 
@@ -591,6 +641,8 @@ and `healthy: false`.
 - A host application can use `ovca-langgraph` as the control loop around the five
   HTTP services because the crate implements that sequence and its tests exercise
   it. The public repository does not include a hosted front end that invokes it.
+- A host application can separately embed `DurableGoalRuntime`; startup does not
+  create run IDs, timestamps, tasks, or storage roots for it.
 
 ### Unknown until deployed by an operator
 
@@ -599,7 +651,7 @@ and `healthy: false`.
 - Whether a downstream application enforces a Policy Tool result as a hard gate.
 - Which LLM or embedding provider an integrator configures.
 
-## 18. Verification map
+## 19. Verification map
 
 | Concern | Primary test surface |
 |---|---|
@@ -608,16 +660,18 @@ and `healthy: false`.
 | Shared MCP response behavior | Rust tests in `ovca-mcp` |
 | Role registration and calls | Rust tests in each role-server crate |
 | Route, grade, rewrite, and fallback behavior | Rust tests in `ovca-langgraph` |
+| Goal scheduling, durable append, and replay | Rust tests in `ovca-types`, `ovca-storage`, `ovca-runtime-core`, and `ovca-langgraph` |
 | Policy Tool behavior | Rust package tests and Python policy tests |
 | Rust/Python parity | `scripts/tests/test_policy_tools_rust_parity.py` |
 | Cognitive advisory helpers | `scripts/tests/test_cognitive_leadership_tools.py` |
 
-## 19. Suggested reading order
+## 20. Suggested reading order
 
 1. `README.md`
 2. This workflow guide
 3. `docs/architecture.md`
-4. `docs/security-boundary.md`
-5. `docs/policy-tools-authority.md`
-6. `docs/limitations.md`
-7. The evidence files listed under the workflow you want to change
+4. `docs/orchestration-runtime.md`
+5. `docs/security-boundary.md`
+6. `docs/policy-tools-authority.md`
+7. `docs/limitations.md`
+8. The evidence files listed under the workflow you want to change

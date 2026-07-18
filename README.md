@@ -13,6 +13,7 @@ keeps operational data outside the source tree.
 - Policy Tools: twelve shared Rust/Python policy tools (`8775`)
 
 See [architecture](docs/architecture.md), the [goal runtime contract](docs/goal-runtime-contract.md),
+the [durable orchestration runtime](docs/orchestration-runtime.md),
 [Policy Tools authority](docs/policy-tools-authority.md), [security boundary](docs/security-boundary.md),
 [dependency lock change](docs/dependency-lock-change.md), and [limitations](docs/limitations.md).
 
@@ -26,7 +27,9 @@ flowchart LR
     Tools --> Services
     Services --> Data["External operational data"]
     App["Optional embedding application"] -.-> Graph["Routing and orchestration library"]
+    App -.-> GoalRuntime["Durable goal runtime library"]
     Graph -.-> Services
+    GoalRuntime -.-> RunLog["External run-event log"]
 ```
 
 The startup script runs Policy Tools plus four role services. Coordinator can
@@ -34,6 +37,12 @@ classify intake, create queued task packets, and aggregate specialist status.
 Engineer, Reviewer, and Auditor expose evidence-oriented tools over the shared MCP
 transport. The orchestration, brain, and runtime-guard crates are reusable library
 paths and are not launched automatically.
+
+The provider-independent goal runtime is also a library path. It validates
+versioned goal and task contracts, creates deterministic sequential or parallel
+plans, persists linked run events under a caller-supplied external root, and
+replays them into a `RunRecord`. It plans parallel waves but does not execute
+workers. Coordinator is the only role allowed to record the final response.
 
 Read the [workflow-by-workflow system guide](docs/system-workflows.md) for inputs,
 outputs, failure states, evidence files, and a flowchart for each workflow.
@@ -104,11 +113,13 @@ OVCA Core is an early public development distribution. APIs and data contracts
 may change. Legacy Aurora, Divina, and Hope enum values exist only to read old
 serialized records; they are inactive, unregistered, and have no public ports.
 
-The provider-independent goal runtime version 1 contracts and transition
-validator are `contract_available` in `ovca-types`. They are not `runtime_wired`:
-the repository does not yet persist or replay these records, schedule their tasks,
-execute their roles, or expose them through a server endpoint. Explicit review
-and audit flags select whether valid completion evidence is accepted from
-`running`, `reviewing`, or `auditing`; approval alone does not select those gates.
+The provider-independent goal runtime version 1 contracts are
+`contract_available` in `ovca-types` and `runtime_wired` through library-only
+paths in `ovca-storage`, `ovca-runtime-core`, and `ovca-langgraph`. The P1 kernel
+schedules tasks, persists strict JSONL events, and deterministically replays a
+durable run. It is not startup-wired or HTTP-exposed, and it does not claim,
+lease, retry, cancel, or execute workers. Explicit review and audit flags select
+whether valid completion evidence is accepted from `running`, `reviewing`, or
+`auditing`; approval alone does not select those gates.
 
 Licensed under Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

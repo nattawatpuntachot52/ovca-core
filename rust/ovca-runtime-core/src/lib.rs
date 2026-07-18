@@ -9,6 +9,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+pub mod finalization;
+pub mod replay;
+pub mod scheduler;
+
+pub use finalization::{FinalizationError, FinalizationKernel};
+pub use replay::{replay_run, validate_event_chain, ReplayError, ReplayedRun};
+pub use scheduler::{schedule_tasks, ScheduleError};
+
 pub const LLM_CALL_CONTRACT_VERSION: &str = "oracle_llm_call_contract.v1";
 pub const EVENT_SCHEMA_VERSION: &str = "oracle_runtime_event.v1";
 pub const SNAPSHOT_SCHEMA_VERSION: &str = "oracle_runtime_guard_snapshot.v1";
