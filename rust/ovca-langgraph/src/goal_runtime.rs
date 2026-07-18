@@ -1,9 +1,12 @@
 use chrono::{DateTime, Utc};
-use ovca_runtime_core::{replay_run, schedule_tasks, ReplayError, ReplayedRun, ScheduleError};
+use ovca_runtime_core::{
+    replay_run, schedule_tasks, DurableExecutionAuthority, DurableExecutionError,
+    InitializeRunResult, LoadedExecutionRun, ReplayError, ReplayedRun, ScheduleError,
+};
 use ovca_storage::{RunEventLog, RunEventLogError};
 use ovca_types::{
-    ContractVersion, EventId, ExecutionPlan, GoalContract, GoalId, Role, RunEvent, RunEventPayload,
-    RunId, RunStatus, Task, TaskId, TaskStatus,
+    ContractVersion, EventId, ExecutionPlan, GoalContract, GoalId, RetryBudget, Role, RunEvent,
+    RunEventPayload, RunId, RunStatus, Task, TaskId, TaskStatus,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -21,6 +24,21 @@ pub struct PlannedRunStamps {
     pub accepted: EventStamp,
     pub plan_recorded: EventStamp,
     pub planned: EventStamp,
+}
+
+/// Evidence returned after the explicit JSONL-to-SQLite execution bootstrap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionBootstrapResult {
+    pub view: RuntimeView,
+    /// True only when this call created the SQLite execution state.
+    pub initialized: bool,
+}
+
+/// The independently authoritative orchestration and execution views of a run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeView {
+    pub orchestration: ReplayedRun,
+    pub execution: LoadedExecutionRun,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,11 +166,57 @@ impl From<ReplayError> for GoalRuntimeError {
 /// Failures produced by [`DurableGoalRuntime`].
 #[derive(Debug)]
 pub enum DurableGoalRuntimeError {
-    Build { source: GoalRuntimeError },
-    Storage { source: RunEventLogError },
-    Replay { source: ReplayError },
-    RunAlreadyExists { run_id: RunId },
-    RunNotFound { run_id: RunId },
+    Build {
+        source: GoalRuntimeError,
+    },
+    Storage {
+        source: RunEventLogError,
+    },
+    Replay {
+        source: ReplayError,
+    },
+    RunAlreadyExists {
+        run_id: RunId,
+    },
+    RunNotFound {
+        run_id: RunId,
+    },
+    Execution {
+        source: DurableExecutionError,
+    },
+    BootstrapRunStatusMismatch {
+        expected: RunStatus,
+        found: RunStatus,
+    },
+    BootstrapGoalMismatch {
+        expected: GoalId,
+        found: Option<GoalId>,
+    },
+    BootstrapTaskSetMismatch {
+        declared: BTreeSet<TaskId>,
+        provided: BTreeSet<TaskId>,
+    },
+    BootstrapTaskStatusMismatch {
+        task_id: TaskId,
+        orchestration: TaskStatus,
+        provided: TaskStatus,
+    },
+    BootstrapPlanMismatch {
+        declared: Option<ExecutionPlan>,
+        provided: ExecutionPlan,
+    },
+    ViewRunMismatch {
+        expected: RunId,
+        found: RunId,
+    },
+    ViewGoalMismatch {
+        expected: GoalId,
+        found: Option<GoalId>,
+    },
+    ViewTaskSetMismatch {
+        orchestration: BTreeSet<TaskId>,
+        execution: BTreeSet<TaskId>,
+    },
 }
 
 impl fmt::Display for DurableGoalRuntimeError {
@@ -165,6 +229,40 @@ impl fmt::Display for DurableGoalRuntimeError {
                 write!(formatter, "run {run_id} already exists")
             }
             Self::RunNotFound { run_id } => write!(formatter, "run {run_id} was not found"),
+            Self::Execution { source } => write!(formatter, "execution authority failed: {source}"),
+            Self::BootstrapRunStatusMismatch { expected, found } => write!(
+                formatter,
+                "execution bootstrap requires orchestration status {expected}, found {found}"
+            ),
+            Self::BootstrapGoalMismatch { expected, found } => write!(
+                formatter,
+                "execution bootstrap goal {found:?} does not match orchestration goal {expected}"
+            ),
+            Self::BootstrapTaskSetMismatch { .. } => formatter.write_str(
+                "execution bootstrap task set does not match the declared orchestration task set",
+            ),
+            Self::BootstrapTaskStatusMismatch {
+                task_id,
+                orchestration,
+                provided,
+            } => write!(
+                formatter,
+                "execution bootstrap task {task_id} status {provided:?} does not match orchestration status {orchestration:?}"
+            ),
+            Self::BootstrapPlanMismatch { .. } => formatter.write_str(
+                "execution bootstrap task definitions do not reproduce the declared execution plan",
+            ),
+            Self::ViewRunMismatch { expected, found } => write!(
+                formatter,
+                "execution view run {found} does not match orchestration run {expected}"
+            ),
+            Self::ViewGoalMismatch { expected, found } => write!(
+                formatter,
+                "execution view goal {found:?} does not match orchestration goal {expected}"
+            ),
+            Self::ViewTaskSetMismatch { .. } => formatter.write_str(
+                "execution view task set does not match the orchestration task set",
+            ),
         }
     }
 }
@@ -175,7 +273,17 @@ impl std::error::Error for DurableGoalRuntimeError {
             Self::Build { source } => Some(source),
             Self::Storage { source } => Some(source),
             Self::Replay { source } => Some(source),
-            Self::RunAlreadyExists { .. } | Self::RunNotFound { .. } => None,
+            Self::Execution { source } => Some(source),
+            Self::RunAlreadyExists { .. }
+            | Self::RunNotFound { .. }
+            | Self::BootstrapRunStatusMismatch { .. }
+            | Self::BootstrapGoalMismatch { .. }
+            | Self::BootstrapTaskSetMismatch { .. }
+            | Self::BootstrapTaskStatusMismatch { .. }
+            | Self::BootstrapPlanMismatch { .. }
+            | Self::ViewRunMismatch { .. }
+            | Self::ViewGoalMismatch { .. }
+            | Self::ViewTaskSetMismatch { .. } => None,
         }
     }
 }
@@ -186,27 +294,42 @@ impl From<RunEventLogError> for DurableGoalRuntimeError {
     }
 }
 
-/// Thin durable wrapper for validated goal-run events.
+/// Durable JSONL orchestration and SQLite execution wrapper for validated goal runs.
 ///
-/// P1 supports one writer per run only. P2 adds claim, lease, CAS, and
-/// concurrency semantics; callers must not infer those guarantees here.
+/// JSONL create, append, and transition methods remain caller-serialized or
+/// single-writer per run. Claim, lease, CAS, and concurrency guarantees are
+/// provided only through the SQLite execution authority methods. Public
+/// assignment and event-producer identities remain the role-only [`Role`] surface.
 #[derive(Debug, Clone)]
 pub struct DurableGoalRuntime {
     log: RunEventLog,
+    execution: DurableExecutionAuthority,
 }
 
 impl DurableGoalRuntime {
     /// Creates a runtime rooted at the caller-supplied external path without
     /// touching the filesystem.
     pub fn new(root: impl AsRef<Path>) -> Self {
+        let root = root.as_ref();
         Self {
             log: RunEventLog::new(root),
+            execution: DurableExecutionAuthority::new(root),
         }
     }
 
     /// Returns the fixed JSONL path used by this runtime.
     pub fn log_path(&self) -> &Path {
         self.log.path()
+    }
+
+    /// Returns the durable SQLite execution authority without opening it.
+    pub fn execution_authority(&self) -> &DurableExecutionAuthority {
+        &self.execution
+    }
+
+    /// Returns the fixed SQLite path used by the execution authority.
+    pub fn execution_database_path(&self) -> std::path::PathBuf {
+        self.execution.database_path()
     }
 
     /// Validates and durably creates a planned run from exactly four bootstrap
@@ -230,6 +353,72 @@ impl DurableGoalRuntime {
         }
 
         self.load_run(&run_id, goal)
+    }
+
+    /// Validates an existing planned JSONL run, then idempotently bootstraps its
+    /// independent SQLite execution authority.
+    ///
+    /// JSONL validation completes before the first possible SQLite write. The
+    /// two stores do not form one transaction.
+    pub fn initialize_execution(
+        &self,
+        run_id: &RunId,
+        goal: &GoalContract,
+        tasks: &[Task],
+        retry_budget: RetryBudget,
+    ) -> Result<ExecutionBootstrapResult, DurableGoalRuntimeError> {
+        let orchestration = self.load_bootstrap_run(run_id, goal)?;
+        validate_execution_bootstrap(&orchestration, goal, tasks)?;
+
+        let InitializeRunResult { state, initialized } = self
+            .execution
+            .initialize_run(run_id.clone(), tasks.to_vec(), retry_budget)
+            .map_err(|source| DurableGoalRuntimeError::Execution { source })?;
+        let view = validate_runtime_view(orchestration, state)?;
+        Ok(ExecutionBootstrapResult { view, initialized })
+    }
+
+    fn load_bootstrap_run(
+        &self,
+        run_id: &RunId,
+        goal: &GoalContract,
+    ) -> Result<ReplayedRun, DurableGoalRuntimeError> {
+        let events = self.log.load_run(run_id)?;
+        if events.is_empty() {
+            return Err(DurableGoalRuntimeError::RunNotFound {
+                run_id: run_id.clone(),
+            });
+        }
+
+        let unbound = replay_run(&events, None)
+            .map_err(|source| DurableGoalRuntimeError::Replay { source })?;
+        validate_goal_contract_versions(goal)
+            .map_err(|source| DurableGoalRuntimeError::Build { source })?;
+        if unbound.run_record.goal_id != goal.id {
+            return Err(DurableGoalRuntimeError::BootstrapGoalMismatch {
+                expected: unbound.run_record.goal_id,
+                found: Some(goal.id.clone()),
+            });
+        }
+
+        replay_run(&events, Some(goal)).map_err(|source| DurableGoalRuntimeError::Replay { source })
+    }
+
+    /// Loads both durable stores and validates their shared identity boundary.
+    ///
+    /// Task statuses are intentionally not reconciled: JSONL remains the P1
+    /// orchestration authority and SQLite is the P2 execution authority.
+    pub fn load_runtime_view(
+        &self,
+        run_id: &RunId,
+        goal: &GoalContract,
+    ) -> Result<RuntimeView, DurableGoalRuntimeError> {
+        let orchestration = self.load_run(run_id, goal)?;
+        let execution = self
+            .execution
+            .load(run_id)
+            .map_err(|source| DurableGoalRuntimeError::Execution { source })?;
+        validate_runtime_view(orchestration, execution)
     }
 
     /// Prospectively validates a caller-supplied complete event before
@@ -277,6 +466,106 @@ impl DurableGoalRuntime {
 
         replay_run(&events, Some(goal)).map_err(|source| DurableGoalRuntimeError::Replay { source })
     }
+}
+
+fn validate_execution_bootstrap(
+    orchestration: &ReplayedRun,
+    goal: &GoalContract,
+    tasks: &[Task],
+) -> Result<(), DurableGoalRuntimeError> {
+    if orchestration.run_record.status != RunStatus::Planned {
+        return Err(DurableGoalRuntimeError::BootstrapRunStatusMismatch {
+            expected: RunStatus::Planned,
+            found: orchestration.run_record.status,
+        });
+    }
+
+    let provided_goal = tasks.first().map(|task| task.goal_id.clone());
+    if provided_goal.as_ref() != Some(&goal.id) || tasks.iter().any(|task| task.goal_id != goal.id)
+    {
+        return Err(DurableGoalRuntimeError::BootstrapGoalMismatch {
+            expected: goal.id.clone(),
+            found: provided_goal,
+        });
+    }
+
+    let declared = orchestration
+        .run_record
+        .task_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let provided = tasks
+        .iter()
+        .map(|task| task.id.clone())
+        .collect::<BTreeSet<_>>();
+    if declared != provided || provided.len() != tasks.len() {
+        return Err(DurableGoalRuntimeError::BootstrapTaskSetMismatch { declared, provided });
+    }
+
+    for task in tasks {
+        let orchestration_status = orchestration.task_statuses[&task.id];
+        if task.status != orchestration_status {
+            return Err(DurableGoalRuntimeError::BootstrapTaskStatusMismatch {
+                task_id: task.id.clone(),
+                orchestration: orchestration_status,
+                provided: task.status,
+            });
+        }
+    }
+
+    let provided_plan = schedule_tasks(tasks).map_err(|source| DurableGoalRuntimeError::Build {
+        source: GoalRuntimeError::Schedule(source),
+    })?;
+    if orchestration.execution_plan.as_ref() != Some(&provided_plan) {
+        return Err(DurableGoalRuntimeError::BootstrapPlanMismatch {
+            declared: orchestration.execution_plan.clone(),
+            provided: provided_plan,
+        });
+    }
+    Ok(())
+}
+
+fn validate_runtime_view(
+    orchestration: ReplayedRun,
+    execution: LoadedExecutionRun,
+) -> Result<RuntimeView, DurableGoalRuntimeError> {
+    if execution.envelope.run_id != orchestration.run_record.id {
+        return Err(DurableGoalRuntimeError::ViewRunMismatch {
+            expected: orchestration.run_record.id.clone(),
+            found: execution.envelope.run_id.clone(),
+        });
+    }
+    if execution.envelope.snapshot.goal_id.as_ref() != Some(&orchestration.run_record.goal_id) {
+        return Err(DurableGoalRuntimeError::ViewGoalMismatch {
+            expected: orchestration.run_record.goal_id.clone(),
+            found: execution.envelope.snapshot.goal_id.clone(),
+        });
+    }
+
+    let orchestration_tasks = orchestration
+        .run_record
+        .task_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let execution_tasks = execution
+        .envelope
+        .tasks
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if orchestration_tasks != execution_tasks {
+        return Err(DurableGoalRuntimeError::ViewTaskSetMismatch {
+            orchestration: orchestration_tasks,
+            execution: execution_tasks,
+        });
+    }
+
+    Ok(RuntimeView {
+        orchestration,
+        execution,
+    })
 }
 
 pub fn build_planned_run(
@@ -471,9 +760,10 @@ fn validate_stamps(stamps: &PlannedRunStamps) -> Result<(), GoalRuntimeError> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use ovca_runtime_core::ClaimRequest;
     use ovca_types::{
-        CompletionPrecondition, CoordinatorFinalResponse, ExecutionMode, PermissionProfile,
-        ProjectId, RiskTier, SpecialistOutput,
+        CompletionPrecondition, CoordinatorFinalResponse, ExecutionMode, LeaseId,
+        PermissionProfile, ProjectId, RiskTier, SpecialistOutput, WorkerId,
     };
     use std::fs;
     use tempfile::TempDir;
@@ -844,6 +1134,334 @@ mod tests {
             .load_run(&RunId::from("run-1"), &goal)
             .expect("fresh runtime should load the persisted run");
         assert_eq!(loaded, created);
+    }
+
+    #[test]
+    fn durable_constructor_is_side_effect_free_for_both_stores() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("runtime-root");
+        let runtime = DurableGoalRuntime::new(&root);
+
+        assert!(!root.exists());
+        assert!(!runtime.log_path().exists());
+        assert!(!runtime.execution_database_path().exists());
+    }
+
+    #[test]
+    fn create_run_writes_only_jsonl_and_leaves_execution_uninitialized() {
+        let dir = TempDir::new().unwrap();
+        let runtime = DurableGoalRuntime::new(dir.path());
+        runtime
+            .create_run(
+                RunId::from("run-1"),
+                &goal(),
+                &[task("task-a", &[])],
+                stamps(),
+            )
+            .unwrap();
+
+        assert!(runtime.log_path().exists());
+        assert!(!runtime.execution_database_path().exists());
+        assert!(matches!(
+            runtime
+                .load_runtime_view(&RunId::from("run-1"), &goal())
+                .unwrap_err(),
+            DurableGoalRuntimeError::Execution {
+                source: DurableExecutionError::RunNotFound { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn initialize_execution_requires_existing_planned_run_before_sqlite_write() {
+        let dir = TempDir::new().unwrap();
+        let runtime = DurableGoalRuntime::new(dir.path());
+        let database_path = runtime.execution_database_path();
+
+        let error = runtime
+            .initialize_execution(
+                &RunId::from("run-1"),
+                &goal(),
+                &[task("task-a", &[])],
+                RetryBudget {
+                    contract_version: ContractVersion::current(),
+                    max_attempts: 2,
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, DurableGoalRuntimeError::RunNotFound { .. }));
+        assert!(!database_path.exists());
+    }
+
+    #[test]
+    fn planned_run_initializes_and_reopens_an_exact_combined_view() {
+        let dir = TempDir::new().unwrap();
+        let goal = goal();
+        let tasks = vec![task("task-a", &[]), task("task-b", &["task-a"])];
+        let runtime = DurableGoalRuntime::new(dir.path());
+        let planned = runtime
+            .create_run(RunId::from("run-1"), &goal, &tasks, stamps())
+            .unwrap();
+        let initialized = runtime
+            .initialize_execution(
+                &RunId::from("run-1"),
+                &goal,
+                &tasks,
+                RetryBudget {
+                    contract_version: ContractVersion::current(),
+                    max_attempts: 3,
+                },
+            )
+            .unwrap();
+
+        assert!(initialized.initialized);
+        assert_eq!(initialized.view.orchestration, planned);
+        assert_eq!(initialized.view.execution.revision, 0);
+        drop(runtime);
+
+        let reopened = DurableGoalRuntime::new(dir.path())
+            .load_runtime_view(&RunId::from("run-1"), &goal)
+            .unwrap();
+        assert_eq!(reopened, initialized.view);
+    }
+
+    #[test]
+    fn shuffled_identical_execution_bootstrap_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let goal = goal();
+        let first_tasks = vec![task("task-a", &[]), task("task-b", &["task-a"])];
+        let shuffled_tasks = vec![first_tasks[1].clone(), first_tasks[0].clone()];
+        let runtime = DurableGoalRuntime::new(dir.path());
+        runtime
+            .create_run(RunId::from("run-1"), &goal, &first_tasks, stamps())
+            .unwrap();
+        let budget = RetryBudget {
+            contract_version: ContractVersion::current(),
+            max_attempts: 2,
+        };
+
+        let first = runtime
+            .initialize_execution(&RunId::from("run-1"), &goal, &first_tasks, budget)
+            .unwrap();
+        let retry = runtime
+            .initialize_execution(&RunId::from("run-1"), &goal, &shuffled_tasks, budget)
+            .unwrap();
+
+        assert!(first.initialized);
+        assert!(!retry.initialized);
+        assert_eq!(retry.view, first.view);
+    }
+
+    #[test]
+    fn bootstrap_mismatches_reject_before_sqlite_mutation() {
+        fn planned_runtime() -> (TempDir, DurableGoalRuntime, GoalContract, Vec<Task>) {
+            let dir = TempDir::new().unwrap();
+            let goal = goal();
+            let tasks = vec![task("task-a", &[]), task("task-b", &["task-a"])];
+            let runtime = DurableGoalRuntime::new(dir.path());
+            runtime
+                .create_run(RunId::from("run-1"), &goal, &tasks, stamps())
+                .unwrap();
+            (dir, runtime, goal, tasks)
+        }
+        let budget = RetryBudget {
+            contract_version: ContractVersion::current(),
+            max_attempts: 2,
+        };
+
+        let (_dir, runtime, goal, mut tasks) = planned_runtime();
+        let mut mismatched_goal = goal.clone();
+        mismatched_goal.id = GoalId::from("different-goal");
+        assert!(matches!(
+            runtime
+                .initialize_execution(&RunId::from("run-1"), &mismatched_goal, &tasks, budget,)
+                .unwrap_err(),
+            DurableGoalRuntimeError::BootstrapGoalMismatch { .. }
+        ));
+        assert!(!runtime.execution_database_path().exists());
+
+        tasks[0].goal_id = GoalId::from("different-goal");
+        assert!(matches!(
+            runtime
+                .initialize_execution(&RunId::from("run-1"), &goal, &tasks, budget)
+                .unwrap_err(),
+            DurableGoalRuntimeError::BootstrapGoalMismatch { .. }
+        ));
+        assert!(!runtime.execution_database_path().exists());
+
+        let (_dir, runtime, goal, mut tasks) = planned_runtime();
+        tasks.pop();
+        assert!(matches!(
+            runtime
+                .initialize_execution(&RunId::from("run-1"), &goal, &tasks, budget)
+                .unwrap_err(),
+            DurableGoalRuntimeError::BootstrapTaskSetMismatch { .. }
+        ));
+        assert!(!runtime.execution_database_path().exists());
+
+        let (_dir, runtime, goal, mut tasks) = planned_runtime();
+        tasks[0].status = TaskStatus::Ready;
+        assert!(matches!(
+            runtime
+                .initialize_execution(&RunId::from("run-1"), &goal, &tasks, budget)
+                .unwrap_err(),
+            DurableGoalRuntimeError::BootstrapTaskStatusMismatch { .. }
+        ));
+        assert!(!runtime.execution_database_path().exists());
+    }
+
+    #[test]
+    fn create_to_initialize_crash_gap_is_recoverable_after_reopen() {
+        let dir = TempDir::new().unwrap();
+        let goal = goal();
+        let tasks = vec![task("task-a", &[])];
+        DurableGoalRuntime::new(dir.path())
+            .create_run(RunId::from("run-1"), &goal, &tasks, stamps())
+            .unwrap();
+
+        let reopened = DurableGoalRuntime::new(dir.path());
+        assert!(matches!(
+            reopened
+                .load_runtime_view(&RunId::from("run-1"), &goal)
+                .unwrap_err(),
+            DurableGoalRuntimeError::Execution {
+                source: DurableExecutionError::RunNotFound { .. }
+            }
+        ));
+        let recovered = reopened
+            .initialize_execution(
+                &RunId::from("run-1"),
+                &goal,
+                &tasks,
+                RetryBudget {
+                    contract_version: ContractVersion::current(),
+                    max_attempts: 2,
+                },
+            )
+            .unwrap();
+        assert!(recovered.initialized);
+    }
+
+    #[test]
+    fn combined_view_exposes_independent_orchestration_and_execution_statuses() {
+        let dir = TempDir::new().unwrap();
+        let goal = goal();
+        let tasks = vec![task("task-a", &[])];
+        let runtime = DurableGoalRuntime::new(dir.path());
+        runtime
+            .create_run(RunId::from("run-1"), &goal, &tasks, stamps())
+            .unwrap();
+        runtime
+            .initialize_execution(
+                &RunId::from("run-1"),
+                &goal,
+                &tasks,
+                RetryBudget {
+                    contract_version: ContractVersion::current(),
+                    max_attempts: 2,
+                },
+            )
+            .unwrap();
+        runtime
+            .execution_authority()
+            .claim(
+                &RunId::from("run-1"),
+                ClaimRequest {
+                    task_id: TaskId::from("task-a"),
+                    worker_id: WorkerId::from("worker-1"),
+                    worker_role: Role::Engineer,
+                    lease_id: LeaseId::from("lease-1"),
+                    now: timestamp(4),
+                    expires_at: timestamp(5),
+                },
+            )
+            .unwrap();
+
+        let view = runtime
+            .load_runtime_view(&RunId::from("run-1"), &goal)
+            .unwrap();
+        assert_eq!(
+            view.orchestration.task_statuses[&TaskId::from("task-a")],
+            TaskStatus::Pending
+        );
+        assert_eq!(
+            view.execution.envelope.snapshot.tasks[&TaskId::from("task-a")].status,
+            TaskStatus::Running
+        );
+    }
+
+    #[test]
+    fn combined_view_reports_structured_identity_mismatch() {
+        let dir = TempDir::new().unwrap();
+        let goal = goal();
+        let tasks = vec![task("task-a", &[])];
+        let runtime = DurableGoalRuntime::new(dir.path());
+        runtime
+            .create_run(RunId::from("run-1"), &goal, &tasks, stamps())
+            .unwrap();
+        let mut mismatched_tasks = tasks;
+        mismatched_tasks[0].goal_id = GoalId::from("different-goal");
+        runtime
+            .execution_authority()
+            .initialize_run(
+                RunId::from("run-1"),
+                mismatched_tasks,
+                RetryBudget {
+                    contract_version: ContractVersion::current(),
+                    max_attempts: 2,
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(
+            runtime
+                .load_runtime_view(&RunId::from("run-1"), &goal)
+                .unwrap_err(),
+            DurableGoalRuntimeError::ViewGoalMismatch {
+                expected,
+                found: Some(found),
+            } if expected == GoalId::from("goal-1") && found == GoalId::from("different-goal")
+        ));
+    }
+
+    #[test]
+    fn traversal_like_run_ids_remain_data_across_both_stores() {
+        let dir = TempDir::new().unwrap();
+        let goal = goal();
+        let tasks = vec![task("task-a", &[])];
+        let runtime = DurableGoalRuntime::new(dir.path());
+        let run_id = RunId::from("../outside/run");
+        let expected_log_path = runtime.log_path().to_path_buf();
+        let expected_database_path = runtime.execution_database_path();
+
+        runtime
+            .create_run(run_id.clone(), &goal, &tasks, stamps())
+            .unwrap();
+        runtime
+            .initialize_execution(
+                &run_id,
+                &goal,
+                &tasks,
+                RetryBudget {
+                    contract_version: ContractVersion::current(),
+                    max_attempts: 2,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(runtime.log_path(), expected_log_path);
+        assert_eq!(runtime.execution_database_path(), expected_database_path);
+        assert_eq!(
+            runtime
+                .load_runtime_view(&run_id, &goal)
+                .unwrap()
+                .execution
+                .envelope
+                .run_id,
+            run_id
+        );
+        assert!(!dir.path().join("outside").exists());
     }
 
     #[test]

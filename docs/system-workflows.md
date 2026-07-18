@@ -512,15 +512,15 @@ deterministic execution plan, writes four linked Coordinator bootstrap events to
 an external strict JSONL log, and reloads them into a `ReplayedRun` in `planned`.
 Later caller-supplied events are replayed in memory before they are appended.
 
-**Why it exists:** Planning, durable evidence, and final-answer ownership need a
-provider-independent contract before worker execution is introduced.
+**Why it exists:** Planning, durable evidence, final-answer ownership, and worker
+lease/write ownership need provider-independent contracts with explicit
+authority boundaries.
 
 **Inputs:** `GoalContract`, pending tasks, `RunId`, four caller-supplied event
-IDs and timestamps, and an external storage root.
+IDs and timestamps, caller-supplied retry budget, and an external storage root.
 
-**Output:** An `ExecutionPlan`, durable linked events, and replayed state with
-plan, task statuses, evidence, specialist outputs, and optional Coordinator final
-response.
+**Output:** An `ExecutionPlan`, durable linked events, replayed orchestration
+state, durable SQLite execution state, and a combined identity-validated view.
 
 ```mermaid
 flowchart TD
@@ -532,16 +532,31 @@ flowchart TD
     Replay -->|"Valid"| Persist["Append, flush, and sync JSONL"]
     Persist --> Reload["Strict reload and replay"]
     Reload --> Planned["Return planned ReplayedRun"]
+    Planned --> Explicit["Explicit initialize_execution"]
+    Explicit --> ValidateExecution["Validate goal, task set, statuses, and plan"]
+    ValidateExecution -->|"Mismatch"| RejectSqlite["Reject before SQLite write"]
+    ValidateExecution -->|"Valid"| Sqlite["Idempotently initialize SQLite execution state"]
+    Sqlite --> Combined["Return both authority views"]
 ```
 
-**Authority boundary:** Only Coordinator may record the final response. P1 does
-not execute planned waves and assumes one writer per run. Worker claim, lease,
-retry, cancellation, and write ownership belong to P2.
+**Authority boundary:** JSONL is authoritative for orchestration events, replay,
+run status, evidence, and the Coordinator final response. SQLite is authoritative
+for execution claims, leases, retries, cancellation, idempotency, revisions, and
+write ownership. The stores are not one transaction. A SQLite claim may show
+`running` while JSONL still shows `pending`; the combined view exposes both and
+does not declare either stale.
+
+**Recovery:** `create_run` writes no SQLite state. If the process stops after the
+planned JSONL run is durable, the missing execution run is a recoverable gap.
+Retrying `initialize_execution` with the identical definitions succeeds
+idempotently. Changed task definitions or retry budget fail without replacement.
 
 **Failure states:** Unsupported contracts, invalid task graphs, malformed JSONL,
-broken event links, invalid transitions, unattached completion evidence, or a
-specialist final response fail explicitly. A storage error during the four
-sequential bootstrap appends can leave a replayable partial run.
+broken event links, invalid transitions, unattached completion evidence, a
+specialist final response, bootstrap identity/status mismatch, corrupt execution
+state, or an existing SQLite definition conflict fail explicitly. A storage
+error during the four sequential JSONL appends can leave a replayable partial
+run. P2C includes no lifecycle append wrapper, projection, or outbox.
 
 **Evidence:** `rust/ovca-langgraph/src/goal_runtime.rs`,
 `rust/ovca-runtime-core/src/replay.rs`,
@@ -632,7 +647,8 @@ and `healthy: false`.
 - Reviewer and Auditor return `unknown` when no matching evidence exists.
 - Team aggregation preserves partial responses and reports offline roles.
 - The durable goal runtime schedules, persists, and replays library-owned run
-  events while preserving Coordinator final-answer ownership.
+  events while preserving Coordinator final-answer ownership, and explicitly
+  bootstraps an independent SQLite execution authority.
 - The public startup does not launch the LangGraph, runtime guard, or brain
   libraries as independent services.
 
@@ -642,7 +658,7 @@ and `healthy: false`.
   HTTP services because the crate implements that sequence and its tests exercise
   it. The public repository does not include a hosted front end that invokes it.
 - A host application can separately embed `DurableGoalRuntime`; startup does not
-  create run IDs, timestamps, tasks, or storage roots for it.
+  create run IDs, timestamps, tasks, retry budgets, or storage roots for it.
 
 ### Unknown until deployed by an operator
 

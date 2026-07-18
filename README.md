@@ -29,7 +29,8 @@ flowchart LR
     App["Optional embedding application"] -.-> Graph["Routing and orchestration library"]
     App -.-> GoalRuntime["Durable goal runtime library"]
     Graph -.-> Services
-    GoalRuntime -.-> RunLog["External run-event log"]
+    GoalRuntime -.-> RunLog["JSONL orchestration evidence"]
+    GoalRuntime -.-> ExecutionDb["SQLite execution authority"]
 ```
 
 The startup script runs Policy Tools plus four role services. Coordinator can
@@ -41,8 +42,10 @@ paths and are not launched automatically.
 The provider-independent goal runtime is also a library path. It validates
 versioned goal and task contracts, creates deterministic sequential or parallel
 plans, persists linked run events under a caller-supplied external root, and
-replays them into a `RunRecord`. It plans parallel waves but does not execute
-workers. Coordinator is the only role allowed to record the final response.
+replays them into a `RunRecord`. An explicit, idempotent P2 bootstrap validates
+that planned JSONL state before initializing SQLite execution leases and write
+ownership. The stores are independent and are not one transaction. Coordinator
+is the only role allowed to record the final response.
 
 Read the [workflow-by-workflow system guide](docs/system-workflows.md) for inputs,
 outputs, failure states, evidence files, and a flowchart for each workflow.
@@ -115,11 +118,12 @@ serialized records; they are inactive, unregistered, and have no public ports.
 
 The provider-independent goal runtime version 1 contracts are
 `contract_available` in `ovca-types` and `runtime_wired` through library-only
-paths in `ovca-storage`, `ovca-runtime-core`, and `ovca-langgraph`. The P1 kernel
-schedules tasks, persists strict JSONL events, and deterministically replays a
-durable run. It is not startup-wired or HTTP-exposed, and it does not claim,
-lease, retry, cancel, or execute workers. Explicit review and audit flags select
-whether valid completion evidence is accepted from `running`, `reviewing`, or
-`auditing`; approval alone does not select those gates.
+paths in `ovca-storage`, `ovca-runtime-core`, and `ovca-langgraph`. JSONL is the
+P1 orchestration and replay-evidence authority. SQLite is the P2 execution lease,
+retry, cancellation, idempotency, and write-ownership authority. The runtime is
+not startup-wired or HTTP-exposed, and it does not invoke live workers or a
+provider. Explicit review and audit flags select whether valid completion
+evidence is accepted from `running`, `reviewing`, or `auditing`; approval alone
+does not select those gates.
 
 Licensed under Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

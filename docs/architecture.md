@@ -28,17 +28,24 @@ from `running` when neither review nor audit is required, from `reviewing` when
 review alone is required, and from `auditing` when audit is required. Approval
 alone does not imply either completion gate.
 
-P1 adds a `runtime_wired`, library-only path across three crates:
+P1 and P2 add a `runtime_wired`, library-only path across three crates:
 
 - `ovca-storage` appends and strictly reloads typed events from a fixed JSONL
   path below a caller-supplied external root.
 - `ovca-runtime-core` creates deterministic execution plans, enforces Coordinator
-  final-answer ownership, validates event chains, and reconstructs run state.
+  final-answer ownership, validates event chains, reconstructs run state, and
+  owns the durable SQLite lease/write lifecycle.
 - `ovca-langgraph` builds the four-event bootstrap through `planned` and wraps
-  validate-before-append plus strict reload/replay in `DurableGoalRuntime`.
+  validate-before-append plus strict reload/replay in `DurableGoalRuntime`. Its
+  explicit `initialize_execution` bridge validates JSONL first and then
+  idempotently initializes SQLite.
 
 This path is additive to the existing request-routing graph. It is not launched
-by `scripts/ovca.ps1` and has no HTTP endpoint. P1 is single-writer-per-run and
-does not lease or execute workers, interrupt for approval, or perform Reviewer or
-Auditor work. See the [goal runtime contract](goal-runtime-contract.md) and
+by `scripts/ovca.ps1` and has no HTTP endpoint. JSONL remains the orchestration
+and replay-evidence authority and retains its single-writer caller obligation.
+SQLite is independently authoritative for execution leases, retries,
+cancellation, idempotency, revisions, and write ownership. The stores have no
+cross-store transaction or automatic lifecycle projection. The library does not
+invoke live workers, interrupt for approval, or perform Reviewer or Auditor work.
+See the [goal runtime contract](goal-runtime-contract.md) and
 [durable orchestration runtime](orchestration-runtime.md) for the exact boundary.

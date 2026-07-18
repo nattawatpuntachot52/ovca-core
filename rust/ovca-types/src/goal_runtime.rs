@@ -76,6 +76,9 @@ string_id!(TaskId);
 string_id!(RunId);
 string_id!(EvidenceId);
 string_id!(EventId);
+string_id!(WorkerId);
+string_id!(LeaseId);
+string_id!(IdempotencyKey);
 
 /// Public runtime roles. Legacy identities are intentionally not part of this contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -232,6 +235,60 @@ pub struct Task {
     pub status: TaskStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Caller-supplied retry policy data interpreted and enforced by the kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryBudget {
+    pub contract_version: ContractVersion,
+    /// Total allowed claim attempts, including the first claim.
+    ///
+    /// The kernel must interpret and enforce this value.
+    pub max_attempts: u32,
+}
+
+/// Caller-supplied claim data for one task execution lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskLease {
+    pub contract_version: ContractVersion,
+    pub run_id: RunId,
+    pub task_id: TaskId,
+    pub worker_id: WorkerId,
+    pub worker_role: Role,
+    pub lease_id: LeaseId,
+    /// Sorted keys make serialized lease fixtures deterministic.
+    #[serde(default)]
+    pub write_keys: BTreeSet<String>,
+    /// Caller-supplied claim attempt number; interpretation belongs to the kernel.
+    pub attempt: u32,
+    /// Total allowed claim attempts, including the first claim.
+    pub max_attempts: u32,
+    pub claimed_at: DateTime<Utc>,
+    pub heartbeat_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Role-neutral terminal outcomes for a task claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskTerminalOutcome {
+    Completed,
+    Cancelled,
+}
+
+/// Caller-supplied terminal record for one task claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskTerminalRecord {
+    pub contract_version: ContractVersion,
+    pub run_id: RunId,
+    pub task_id: TaskId,
+    pub worker_id: WorkerId,
+    pub lease_id: LeaseId,
+    pub idempotency_key: IdempotencyKey,
+    pub outcome: TaskTerminalOutcome,
+    pub occurred_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Stable evidence categories independent of any storage or provider.
@@ -716,6 +773,144 @@ mod tests {
         let id = ProjectId::new("project-1");
         assert_eq!(serde_json::to_value(&id).unwrap(), json!("project-1"));
         assert_eq!(id.as_str(), "project-1");
+    }
+
+    #[test]
+    fn lifecycle_ids_are_transparent_strings() {
+        let worker_id = WorkerId::new("worker-1");
+        let lease_id = LeaseId::new("lease-1");
+        let idempotency_key = IdempotencyKey::new("terminal:run-1:task-1:attempt-1");
+
+        assert_eq!(serde_json::to_value(&worker_id).unwrap(), json!("worker-1"));
+        assert_eq!(serde_json::to_value(&lease_id).unwrap(), json!("lease-1"));
+        assert_eq!(
+            serde_json::to_value(&idempotency_key).unwrap(),
+            json!("terminal:run-1:task-1:attempt-1")
+        );
+        assert_round_trip(&worker_id);
+        assert_round_trip(&lease_id);
+        assert_round_trip(&idempotency_key);
+    }
+
+    #[test]
+    fn retry_budget_max_attempts_includes_first_claim_as_kernel_input() {
+        let budget = RetryBudget {
+            contract_version: ContractVersion::current(),
+            max_attempts: 3,
+        };
+
+        assert_eq!(
+            serde_json::to_value(budget).unwrap(),
+            json!({"contract_version": 1, "max_attempts": 3})
+        );
+        assert_eq!(budget.contract_version, GOAL_RUNTIME_CONTRACT_VERSION);
+        assert_eq!(budget.max_attempts, 3);
+        assert_round_trip(&budget);
+    }
+
+    #[test]
+    fn task_lease_has_exact_json_shape_and_deterministic_write_keys() {
+        let lease = TaskLease {
+            contract_version: ContractVersion::current(),
+            run_id: RunId::from("run-1"),
+            task_id: TaskId::from("task-1"),
+            worker_id: WorkerId::from("worker-1"),
+            worker_role: Role::Engineer,
+            lease_id: LeaseId::from("lease-1"),
+            write_keys: BTreeSet::from([
+                "rust:ovca-types:alpha".to_owned(),
+                "rust:ovca-types:zeta".to_owned(),
+            ]),
+            attempt: 1,
+            max_attempts: 3,
+            claimed_at: timestamp(),
+            heartbeat_at: timestamp(),
+            expires_at: timestamp(),
+        };
+
+        let value = serde_json::to_value(&lease).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "contract_version": 1,
+                "run_id": "run-1",
+                "task_id": "task-1",
+                "worker_id": "worker-1",
+                "worker_role": "engineer",
+                "lease_id": "lease-1",
+                "write_keys": ["rust:ovca-types:alpha", "rust:ovca-types:zeta"],
+                "attempt": 1,
+                "max_attempts": 3,
+                "claimed_at": "2026-07-16T09:30:00Z",
+                "heartbeat_at": "2026-07-16T09:30:00Z",
+                "expires_at": "2026-07-16T09:30:00Z"
+            })
+        );
+        assert_eq!(lease.contract_version, GOAL_RUNTIME_CONTRACT_VERSION);
+        assert_round_trip(&lease);
+
+        let first = serde_json::to_string(&lease).unwrap();
+        let second = serde_json::to_string(&lease).unwrap();
+        assert_eq!(first, second);
+        assert!(
+            first.find("rust:ovca-types:alpha").unwrap()
+                < first.find("rust:ovca-types:zeta").unwrap()
+        );
+    }
+
+    #[test]
+    fn terminal_outcome_has_exact_completed_cancelled_shape() {
+        assert_eq!(
+            serde_json::to_value(TaskTerminalOutcome::Completed).unwrap(),
+            json!("completed")
+        );
+        assert_eq!(
+            serde_json::to_value(TaskTerminalOutcome::Cancelled).unwrap(),
+            json!("cancelled")
+        );
+        assert_round_trip(&TaskTerminalOutcome::Completed);
+        assert_round_trip(&TaskTerminalOutcome::Cancelled);
+    }
+
+    #[test]
+    fn terminal_record_has_exact_json_shape_and_round_trips() {
+        let record = TaskTerminalRecord {
+            contract_version: ContractVersion::current(),
+            run_id: RunId::from("run-1"),
+            task_id: TaskId::from("task-1"),
+            worker_id: WorkerId::from("worker-1"),
+            lease_id: LeaseId::from("lease-1"),
+            idempotency_key: IdempotencyKey::from("terminal:run-1:task-1:attempt-1"),
+            outcome: TaskTerminalOutcome::Cancelled,
+            occurred_at: timestamp(),
+            reason: Some("owner cancelled".into()),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&record).unwrap(),
+            json!({
+                "contract_version": 1,
+                "run_id": "run-1",
+                "task_id": "task-1",
+                "worker_id": "worker-1",
+                "lease_id": "lease-1",
+                "idempotency_key": "terminal:run-1:task-1:attempt-1",
+                "outcome": "cancelled",
+                "occurred_at": "2026-07-16T09:30:00Z",
+                "reason": "owner cancelled"
+            })
+        );
+        assert_eq!(record.contract_version, GOAL_RUNTIME_CONTRACT_VERSION);
+        assert_round_trip(&record);
+
+        let without_reason = TaskTerminalRecord {
+            reason: None,
+            ..record
+        };
+        assert_eq!(
+            serde_json::to_value(without_reason).unwrap().get("reason"),
+            None
+        );
     }
 
     #[test]

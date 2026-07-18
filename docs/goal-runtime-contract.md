@@ -6,11 +6,12 @@ The goal runtime contract is `contract_available` in `ovca-types`. Versioned
 Rust and JSON models plus a pure run-state transition validator are available to
 embedding callers.
 
-P1 consumes those contracts through a `runtime_wired`, library-only path. It can
+P1 and P2 consume those contracts through a `runtime_wired`, library-only path. It can
 schedule tasks, append strict run events under an external root, validate an
-event chain, and deterministically replay a `RunRecord`. This is not a service:
-startup does not launch it and no HTTP endpoint exposes it. P1 also does not
-lease or execute workers, request live approvals, perform reviews or audits, call
+event chain, deterministically replay a `RunRecord`, and maintain an independent
+SQLite execution lifecycle with leases and write ownership. This is not a
+service: startup does not launch it and no HTTP endpoint exposes it. It does not
+invoke workers, request live approvals, perform reviews or audits, call
 providers, or authorize external side effects.
 
 ## Contract version
@@ -161,10 +162,23 @@ then reloads and replays the durable bytes. `ReplayedRun` contains `RunRecord`,
 the execution plan, task statuses, completion evidence, ordered specialist
 outputs, and the optional Coordinator final response.
 
-P1 assumes one writer per run. Cross-process ownership, claim, lease,
-compare-and-swap, retry, cancellation, and idempotent crash recovery belong to
-P2. A failure between the four bootstrap appends can leave a valid partial event
-stream; P1 does not repair it automatically.
+JSONL assumes one writer per run. SQLite is the separate P2 authority for claim,
+lease, compare-and-swap revision, heartbeat, retry, cancellation, idempotency,
+and write ownership. `DurableGoalRuntime::new` opens neither store.
+`create_run` still writes only the validated planned JSONL events.
+`initialize_execution` first reloads and replays that run, validates the goal,
+exact declared task ID set, task statuses, and reproduced plan, and only then
+idempotently initializes SQLite. `load_runtime_view` validates shared run, goal,
+and task-set identity and returns both authorities without requiring their task
+statuses to remain equal.
+
+The JSONL and SQLite operations are not one transaction. A crash after
+`create_run` but before SQLite initialization leaves an explicit, recoverable
+bootstrap gap. Retrying `initialize_execution` with the identical task
+definition and retry budget either creates revision zero or returns the existing
+state. A failure between the four JSONL bootstrap appends can still leave a valid
+partial event stream; P1 does not repair it automatically. P2C adds no lifecycle
+event projection or outbox.
 
 ## Verification surface
 
@@ -173,6 +187,7 @@ trips, deterministic event serialization, valid and invalid transitions,
 completion gates, and required evidence. `ovca-runtime-core` tests cover golden
 scheduling, final-answer ownership, event-chain integrity, replay, and durable
 reopen equivalence. `ovca-langgraph` tests cover deterministic bootstrap,
-contract-version rejection, validate-before-append behavior, strict reload, and
+contract-version rejection, validate-before-append behavior, strict reload,
+two-store recovery and idempotency, independent status views, path-safe IDs, and
 Coordinator-only final responses. See
 [durable orchestration runtime](orchestration-runtime.md) for the workflow map.
