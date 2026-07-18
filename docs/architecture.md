@@ -28,24 +28,34 @@ from `running` when neither review nor audit is required, from `reviewing` when
 review alone is required, and from `auditing` when audit is required. Approval
 alone does not imply either completion gate.
 
-P1 and P2 add a `runtime_wired`, library-only path across three crates:
+P1 through P3 add a `runtime_wired`, library-only path across three crates:
 
 - `ovca-storage` appends and strictly reloads typed events from a fixed JSONL
   path below a caller-supplied external root.
 - `ovca-runtime-core` creates deterministic execution plans, enforces Coordinator
   final-answer ownership, validates event chains, reconstructs run state, and
-  owns the durable SQLite lease/write lifecycle.
+  owns the durable SQLite lease/write lifecycle, R0-R3 guard policy, and durable
+  approval ledger.
 - `ovca-langgraph` builds the four-event bootstrap through `planned` and wraps
   validate-before-append plus strict reload/replay in `DurableGoalRuntime`. Its
   explicit `initialize_execution` bridge validates JSONL first and then
-  idempotently initializes SQLite.
+  idempotently initializes SQLite. The same runtime exposes typed guard
+  evaluation, guarded execution, decision, strict-load, and approved-resume
+  methods without opening any store during construction.
 
 This path is additive to the existing request-routing graph. It is not launched
 by `scripts/ovca.ps1` and has no HTTP endpoint. JSONL remains the orchestration
 and replay-evidence authority and retains its single-writer caller obligation.
 SQLite is independently authoritative for execution leases, retries,
-cancellation, idempotency, revisions, and write ownership. The stores have no
-cross-store transaction or automatic lifecycle projection. The library does not
-invoke live workers, interrupt for approval, or perform Reviewer or Auditor work.
+cancellation, idempotency, revisions, and write ownership. The approval ledger
+is independently authoritative for exact R2 requests, caller-supplied owner
+decisions, and consumption. These are three logical authorities over two durable
+media: JSONL and one shared SQLite versioned-state database. Execution uses the
+`execution_run:` entity namespace and approval uses `guard_approval:` in that
+database. Current APIs expose no combined execution-plus-approval transaction.
+JSONL and SQLite have no cross-medium transaction, outbox, reconciliation, or
+automatic lifecycle projection. The library does not invoke live workers or
+perform Reviewer or Auditor work; it returns those requirements for downstream
+P4 completion enforcement.
 See the [goal runtime contract](goal-runtime-contract.md) and
 [durable orchestration runtime](orchestration-runtime.md) for the exact boundary.

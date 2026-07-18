@@ -79,6 +79,8 @@ string_id!(EventId);
 string_id!(WorkerId);
 string_id!(LeaseId);
 string_id!(IdempotencyKey);
+string_id!(GuardRequestId);
+string_id!(ApprovalRequestId);
 
 /// Public runtime roles. Legacy identities are intentionally not part of this contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -146,6 +148,130 @@ pub struct PermissionProfile {
     pub approval_required: bool,
     pub review_required: bool,
     pub audit_required: bool,
+}
+
+/// Runtime surface inspected before an operation can execute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuardSurface {
+    Input,
+    Output,
+    Tool,
+}
+
+/// Declared side-effect class for a guarded operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SideEffectClass {
+    ReadOnly,
+    ReversibleLocalWrite,
+    RepositoryWrite,
+    NetworkAction,
+    Publication,
+    ExternalSideEffect,
+    Destructive,
+    SecretBearing,
+    Irreversible,
+    Privileged,
+}
+
+/// Evidence gates that must be satisfied around an allowed operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuardRequirement {
+    OwnerApproval,
+    Reviewer,
+    Auditor,
+}
+
+/// Stable reasons that a guard request cannot proceed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuardDenyReason {
+    UnsupportedContractVersion,
+    BlankGuardRequestId,
+    BlankApprovalRequestId,
+    BlankOperationLabel,
+    InvalidKey,
+    DuplicateKey,
+    BlankKey,
+    RiskTierMismatch,
+    MissingResourcePermission,
+    MissingWritePermission,
+    MissingRequiredDeclaration,
+    R3DenyByDefault,
+}
+
+/// Human authority that can decide an approval request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalAuthority {
+    ExplicitOwner,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDisposition {
+    Approved,
+    Denied,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalState {
+    Pending,
+    Approved,
+    Denied,
+    Consumed,
+}
+
+/// Caller-authored operation declaration evaluated by the guard policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuardRequest {
+    pub contract_version: ContractVersion,
+    pub id: GuardRequestId,
+    pub surface: GuardSurface,
+    pub side_effect: SideEffectClass,
+    pub operation_label: String,
+    pub resource_keys: Vec<String>,
+    pub write_keys: Vec<String>,
+    pub permission_profile: PermissionProfile,
+}
+
+/// Durable pause record for a guard request awaiting human authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalRequest {
+    pub contract_version: ContractVersion,
+    pub id: ApprovalRequestId,
+    pub guard_request: GuardRequest,
+    pub requested_at: DateTime<Utc>,
+}
+
+/// Caller-supplied decision bound to one exact approval and guard request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalDecisionRecord {
+    pub contract_version: ContractVersion,
+    pub approval_request_id: ApprovalRequestId,
+    pub guard_request_id: GuardRequestId,
+    pub authority: ApprovalAuthority,
+    pub disposition: ApprovalDisposition,
+    pub decided_at: DateTime<Utc>,
+}
+
+/// Deterministic policy result. Evaluation and persistence belong to later phases.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GuardOutcome {
+    Allow {
+        required_gates: BTreeSet<GuardRequirement>,
+    },
+    PauseForApproval {
+        approval_request: ApprovalRequest,
+        required_gates: BTreeSet<GuardRequirement>,
+    },
+    Deny {
+        reasons: BTreeSet<GuardDenyReason>,
+    },
 }
 
 /// A project groups goal contracts without embedding runtime behavior.
@@ -790,6 +916,224 @@ mod tests {
         assert_round_trip(&worker_id);
         assert_round_trip(&lease_id);
         assert_round_trip(&idempotency_key);
+    }
+
+    #[test]
+    fn guard_and_approval_ids_are_transparent_strings() {
+        let guard_id = GuardRequestId::new("guard-1");
+        let approval_id = ApprovalRequestId::new("approval-1");
+
+        assert_eq!(serde_json::to_value(&guard_id).unwrap(), json!("guard-1"));
+        assert_eq!(
+            serde_json::to_value(&approval_id).unwrap(),
+            json!("approval-1")
+        );
+        assert_round_trip(&guard_id);
+        assert_round_trip(&approval_id);
+    }
+
+    #[test]
+    fn guard_surface_and_side_effect_variants_use_exact_snake_case_json() {
+        let surfaces = [
+            (GuardSurface::Input, "input"),
+            (GuardSurface::Output, "output"),
+            (GuardSurface::Tool, "tool"),
+        ];
+        for (variant, expected) in surfaces {
+            assert_eq!(serde_json::to_value(variant).unwrap(), json!(expected));
+            assert_round_trip(&variant);
+        }
+
+        let side_effects = [
+            (SideEffectClass::ReadOnly, "read_only"),
+            (
+                SideEffectClass::ReversibleLocalWrite,
+                "reversible_local_write",
+            ),
+            (SideEffectClass::RepositoryWrite, "repository_write"),
+            (SideEffectClass::NetworkAction, "network_action"),
+            (SideEffectClass::Publication, "publication"),
+            (SideEffectClass::ExternalSideEffect, "external_side_effect"),
+            (SideEffectClass::Destructive, "destructive"),
+            (SideEffectClass::SecretBearing, "secret_bearing"),
+            (SideEffectClass::Irreversible, "irreversible"),
+            (SideEffectClass::Privileged, "privileged"),
+        ];
+        for (variant, expected) in side_effects {
+            assert_eq!(serde_json::to_value(variant).unwrap(), json!(expected));
+            assert_round_trip(&variant);
+        }
+    }
+
+    fn guard_request() -> GuardRequest {
+        GuardRequest {
+            contract_version: ContractVersion::current(),
+            id: GuardRequestId::from("guard-1"),
+            surface: GuardSurface::Tool,
+            side_effect: SideEffectClass::RepositoryWrite,
+            operation_label: "update goal runtime contracts".into(),
+            resource_keys: vec!["repo:ovca-core".into()],
+            write_keys: vec!["rust:ovca-types".into()],
+            permission_profile: permission_profile(),
+        }
+    }
+
+    #[test]
+    fn guard_request_has_exact_json_and_full_permission_binding() {
+        let request = guard_request();
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            json!({
+                "contract_version": 1,
+                "id": "guard-1",
+                "surface": "tool",
+                "side_effect": "repository_write",
+                "operation_label": "update goal runtime contracts",
+                "resource_keys": ["repo:ovca-core"],
+                "write_keys": ["rust:ovca-types"],
+                "permission_profile": {
+                    "contract_version": 1,
+                    "risk_tier": "r1",
+                    "resource_keys": ["repo:ovca-core"],
+                    "write_keys": ["rust:ovca-types"],
+                    "approval_required": false,
+                    "review_required": true,
+                    "audit_required": false
+                }
+            })
+        );
+        assert_round_trip(&request);
+    }
+
+    #[test]
+    fn approval_request_and_decision_preserve_exact_bindings() {
+        let approval_request = ApprovalRequest {
+            contract_version: ContractVersion::current(),
+            id: ApprovalRequestId::from("approval-1"),
+            guard_request: guard_request(),
+            requested_at: timestamp(),
+        };
+        let decision = ApprovalDecisionRecord {
+            contract_version: ContractVersion::current(),
+            approval_request_id: ApprovalRequestId::from("approval-1"),
+            guard_request_id: GuardRequestId::from("guard-1"),
+            authority: ApprovalAuthority::ExplicitOwner,
+            disposition: ApprovalDisposition::Approved,
+            decided_at: timestamp(),
+        };
+
+        let request_json = serde_json::to_value(&approval_request).unwrap();
+        assert_eq!(
+            request_json,
+            json!({
+                "contract_version": 1,
+                "id": "approval-1",
+                "guard_request": {
+                    "contract_version": 1,
+                    "id": "guard-1",
+                    "surface": "tool",
+                    "side_effect": "repository_write",
+                    "operation_label": "update goal runtime contracts",
+                    "resource_keys": ["repo:ovca-core"],
+                    "write_keys": ["rust:ovca-types"],
+                    "permission_profile": {
+                        "contract_version": 1,
+                        "risk_tier": "r1",
+                        "resource_keys": ["repo:ovca-core"],
+                        "write_keys": ["rust:ovca-types"],
+                        "approval_required": false,
+                        "review_required": true,
+                        "audit_required": false
+                    }
+                },
+                "requested_at": "2026-07-16T09:30:00Z"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&decision).unwrap(),
+            json!({
+                "contract_version": 1,
+                "approval_request_id": "approval-1",
+                "guard_request_id": "guard-1",
+                "authority": "explicit_owner",
+                "disposition": "approved",
+                "decided_at": "2026-07-16T09:30:00Z"
+            })
+        );
+        assert_round_trip(&approval_request);
+        assert_round_trip(&decision);
+        assert_round_trip(&ApprovalState::Pending);
+    }
+
+    #[test]
+    fn guard_outcome_sets_serialize_deterministically() {
+        let required_gates = BTreeSet::from([
+            GuardRequirement::Reviewer,
+            GuardRequirement::OwnerApproval,
+            GuardRequirement::Auditor,
+        ]);
+        let allow = GuardOutcome::Allow {
+            required_gates: required_gates.clone(),
+        };
+        assert_eq!(
+            serde_json::to_value(&allow).unwrap(),
+            json!({
+                "type": "allow",
+                "required_gates": ["owner_approval", "reviewer", "auditor"]
+            })
+        );
+
+        let pause = GuardOutcome::PauseForApproval {
+            approval_request: ApprovalRequest {
+                contract_version: ContractVersion::current(),
+                id: ApprovalRequestId::from("approval-1"),
+                guard_request: guard_request(),
+                requested_at: timestamp(),
+            },
+            required_gates,
+        };
+        let pause_json = serde_json::to_value(&pause).unwrap();
+        assert_eq!(pause_json["type"], json!("pause_for_approval"));
+        assert_eq!(
+            pause_json["required_gates"],
+            json!(["owner_approval", "reviewer", "auditor"])
+        );
+
+        let deny = GuardOutcome::Deny {
+            reasons: BTreeSet::from([
+                GuardDenyReason::R3DenyByDefault,
+                GuardDenyReason::BlankKey,
+                GuardDenyReason::UnsupportedContractVersion,
+            ]),
+        };
+        assert_eq!(
+            serde_json::to_value(&deny).unwrap(),
+            json!({
+                "type": "deny",
+                "reasons": [
+                    "unsupported_contract_version",
+                    "blank_key",
+                    "r3_deny_by_default"
+                ]
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(BTreeSet::from([
+                GuardDenyReason::BlankGuardRequestId,
+                GuardDenyReason::BlankApprovalRequestId,
+                GuardDenyReason::BlankOperationLabel,
+            ]))
+            .unwrap(),
+            json!([
+                "blank_guard_request_id",
+                "blank_approval_request_id",
+                "blank_operation_label"
+            ])
+        );
+        assert_round_trip(&allow);
+        assert_round_trip(&pause);
+        assert_round_trip(&deny);
     }
 
     #[test]

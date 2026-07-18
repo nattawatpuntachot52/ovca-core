@@ -8,10 +8,13 @@
 | Scheduler, event log, replay, and durable kernel | `runtime_wired`, `library-only` | An embedding caller can create and extend a durable run |
 | Startup and HTTP | not wired | `scripts/ovca.ps1` does not launch or expose this kernel |
 | Worker lifecycle | `runtime_wired`, `library-only` | P2 SQLite authority owns claim, lease, heartbeat, retry, cancellation, idempotency, and write ownership |
+| Guard and approval lifecycle | `runtime_wired`, `library-only` | P3 evaluates R0-R3 and durably pauses, decides, and consumes exact R2 requests |
 
 P1 turns the P0 contracts into deterministic orchestration and replay. P2 adds a
 durable execution authority without adding a provider, network call, or live
-worker invocation.
+worker invocation. P3 adds a third logical authority for guarded effect closures;
+it shares the SQLite versioned-state database with execution lifecycle state and
+does not add live HTTP, provider, service, authentication, or credential wiring.
 
 ## Bootstrap workflow
 
@@ -41,9 +44,10 @@ are disjoint. A parallel wave is a plan, not evidence that workers ran.
 
 ## P2 execution bootstrap workflow
 
-`DurableGoalRuntime::new` constructs both fixed-path store handles without
-touching the filesystem. `create_run` remains a JSONL-only operation. The caller
-must explicitly bridge the stores with `initialize_execution`.
+`DurableGoalRuntime::new` constructs orchestration, execution, and approval
+authority handles without touching either durable medium. `create_run` remains a
+JSONL-only operation. The caller must explicitly bridge JSONL orchestration to
+the SQLite execution namespace with `initialize_execution`.
 
 ```mermaid
 flowchart TD
@@ -61,23 +65,68 @@ flowchart TD
 ```
 
 The order is durable JSONL validation first, SQLite initialization second. There
-is no cross-store transaction. If a process stops after `create_run`, the absent
-SQLite state is an explicit bootstrap gap. Retrying `initialize_execution` with
-identical tasks and retry budget recovers it. Retrying after SQLite already
-exists is idempotent; a changed definition fails instead of replacing state.
+is no cross-medium transaction. If a process stops after `create_run`, the absent
+SQLite execution entity is an explicit bootstrap gap. Retrying
+`initialize_execution` with identical tasks and retry budget recovers it.
+Retrying after the entity already exists is idempotent; a changed definition
+fails instead of replacing state.
+
+## P3 guard, pause, and resume workflow
+
+`DurableGoalRuntime` owns a `DurableGuardrailAuthority` rooted at the same
+caller-supplied external root. Construction remains filesystem-side-effect free.
+Execution records use the `execution_run:` entity namespace and approval records
+use `guard_approval:` in the same SQLite versioned-state database. The runtime
+exposes typed evaluation/record, guarded execution, owner decision, strict
+approval load, and exact approved-resume methods. Those APIs expose no combined
+execution-plus-approval transaction.
+
+```mermaid
+flowchart TD
+    Request["GuardRequest on input, output, or tool"] --> Validate["Validate version, tier, keys, permissions, and declarations"]
+    Validate -->|"Invalid"| DenyInvalid["Deny before effect"]
+    Validate --> Tier{"Risk tier"}
+    Tier -->|"R0"| ExecuteR0["Execute effect; no approval state"]
+    Tier -->|"R1"| ExecuteR1["Execute effect; return Reviewer requirement"]
+    Tier -->|"R2"| Pause["Persist exact pending approval before effect"]
+    Tier -->|"R3"| DenyR3["Deny by default before effect"]
+    Pause --> Decision{"Typed caller decision"}
+    Decision -->|"Denied"| Denied["Do not execute"]
+    Decision -->|"Approved"| Match{"Exact request and permission match?"}
+    Match -->|"No"| Mismatch["Reject without consumption"]
+    Match -->|"Yes"| Consume["CAS approved to consumed"]
+    Consume --> Effect["Invoke effect closure at most once"]
+    Effect --> Gates["Return Reviewer and Auditor requirements for downstream P4 enforcement"]
+```
+
+R2 covers repository writes, network actions, publication, and external side
+effects on every guard surface. All pause before the effect closure. R3 covers
+destructive, secret-bearing, irreversible, and privileged effects and is denied
+by default. `ApprovalAuthority::ExplicitOwner` is a typed caller assertion, not
+authentication, tenancy, credential, session, or identity proof.
+
+Consumption occurs before the effect closure. Approval consumption and an
+external side effect are not one transaction. Failure or panic after consumption
+can leave no external effect while still enforcing at-most-once/no-retry. P3
+returns Reviewer and Auditor requirements but does not satisfy their evidence
+decisions; that completion enforcement belongs to P4.
 
 ## Authority matrix
 
-| Concern | Authority |
-|---|---|
-| Run events, orchestration status, declared task IDs, plan, evidence, and replay | JSONL P1 event log |
-| Claims, leases, heartbeats, attempts, terminal idempotency, CAS revision, and write owners | SQLite P2 execution state |
-| Shared run, goal, and exact task-set identity | Validated by the combined runtime view |
-| Task status after bootstrap | Exposed separately by both stores; equality is not required |
+| Concern | Logical authority | Durable medium / namespace |
+|---|---|---|
+| Run events, orchestration status, declared task IDs, plan, evidence, and replay | P1 orchestration | JSONL event log |
+| Claims, leases, heartbeats, attempts, terminal idempotency, CAS revision, and write owners | P2 execution lifecycle | Shared SQLite database, `execution_run:` entities |
+| Exact guard request, caller decision, approval state, and consumption | P3 approval ledger | Shared SQLite database, `guard_approval:` entities |
+| Shared run, goal, and exact task-set identity | Combined runtime-view validation | Reads JSONL orchestration and SQLite execution entities |
+| Task status after bootstrap | Orchestration and execution authorities expose it separately | Equality is not required |
 
 For example, a durable SQLite claim changes its task snapshot to `running` while
 JSONL remains `pending` until a caller explicitly appends a valid orchestration
-event. P2C does not add that append wrapper, an outbox, or fabricated atomicity.
+event. Approval state also changes independently in its SQLite entity namespace.
+Current APIs expose no combined execution-plus-approval transaction. JSONL and
+SQLite have no cross-medium transaction, outbox, projection, reconciliation, or
+fabricated atomicity.
 
 ## Append workflow
 
@@ -143,8 +192,10 @@ data when the caller supplies an external root.
 | `build_planned_run` | `ovca-langgraph` | Pure four-event bootstrap construction |
 | `DurableGoalRuntime` | `ovca-langgraph` | Validate-before-append and strict reload/replay |
 | `DurableExecutionAuthority` | `ovca-runtime-core` | Transactional SQLite execution lease and write ownership |
+| `DurableGuardrailAuthority` | `ovca-runtime-core` | Durable exact R2 pause, decision, strict load, and at-most-once consumption |
 | `initialize_execution` | `ovca-langgraph` | Validate JSONL first, then idempotently bootstrap SQLite |
 | `load_runtime_view` | `ovca-langgraph` | Return both authorities after identity/task-set checks |
+| `execute_guarded` / `resume_approved` | `ovca-langgraph` | Preserve typed guard execution and approval errors at the runtime boundary |
 
 ## Runtime limitations
 
@@ -153,11 +204,16 @@ data when the caller supplies an external root.
 - Bootstrap writes four synced JSONL lines sequentially. A storage failure can
   leave a replayable partial bootstrap, and automatic recovery is not present.
 - The kernel plans parallel waves but does not execute them.
-- There is no cross-store transaction, JSONL lifecycle projection, or outbox.
-- Combined two-store behavior has no cross-process integration test yet.
+- Current APIs expose no combined execution-plus-approval transaction in the
+  shared SQLite database. JSONL and SQLite have no cross-medium transaction,
+  lifecycle projection, outbox, or reconciliation.
+- Combined two-medium behavior has no cross-process integration test yet.
 - No live worker or provider path validates execution against external effects.
-- No approval interruption, live Reviewer action, live Auditor action, provider
-  call, credential, server endpoint, or remote side effect is included.
+- P3 interrupts R2 closures in the library, but no live Reviewer action, live
+  Auditor action, provider call, credential, server endpoint, or remote side
+  effect is included.
+- Approval consumption precedes the effect and is not atomic with it. A failure
+  or panic can consume approval without producing an external effect.
 
 ## Verification map
 
@@ -169,6 +225,7 @@ data when the caller supplies an external root.
 | Strict durable bytes and path safety | `rust/ovca-storage/src/run_events.rs` tests |
 | Bootstrap and validate-before-append behavior | `rust/ovca-langgraph/src/goal_runtime.rs` tests |
 | Two-store bootstrap, recovery, combined views, and authority divergence | `rust/ovca-langgraph/src/goal_runtime.rs` tests |
+| R0/R2/R3 guarded execution, reopen, mismatch, concurrent resume, and logical-authority independence | `rust/ovca-langgraph/src/goal_runtime.rs` tests |
 
 All run IDs, event IDs, worker IDs, lease IDs, idempotency keys, and timestamps
 are caller supplied. The runtime generates no implicit clock or identity values.

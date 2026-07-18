@@ -512,15 +512,17 @@ deterministic execution plan, writes four linked Coordinator bootstrap events to
 an external strict JSONL log, and reloads them into a `ReplayedRun` in `planned`.
 Later caller-supplied events are replayed in memory before they are appended.
 
-**Why it exists:** Planning, durable evidence, final-answer ownership, and worker
-lease/write ownership need provider-independent contracts with explicit
-authority boundaries.
+**Why it exists:** Planning, durable evidence, final-answer ownership, worker
+lease/write ownership, and sensitive-effect approval need provider-independent
+contracts with explicit authority boundaries.
 
 **Inputs:** `GoalContract`, pending tasks, `RunId`, four caller-supplied event
-IDs and timestamps, caller-supplied retry budget, and an external storage root.
+IDs and timestamps, caller-supplied retry budget, typed guard requests and owner
+decisions, and an external storage root.
 
 **Output:** An `ExecutionPlan`, durable linked events, replayed orchestration
-state, durable SQLite execution state, and a combined identity-validated view.
+state, durable SQLite execution state, an independent approval record when R2
+pauses, and typed guarded-execution results.
 
 ```mermaid
 flowchart TD
@@ -535,16 +537,49 @@ flowchart TD
     Planned --> Explicit["Explicit initialize_execution"]
     Explicit --> ValidateExecution["Validate goal, task set, statuses, and plan"]
     ValidateExecution -->|"Mismatch"| RejectSqlite["Reject before SQLite write"]
-    ValidateExecution -->|"Valid"| Sqlite["Idempotently initialize SQLite execution state"]
+    ValidateExecution -->|"Valid"| Sqlite["Initialize execution_run: entity in shared SQLite state DB"]
     Sqlite --> Combined["Return both authority views"]
+```
+
+Guarded effects use a third logical authority rooted below the same external
+root. Its entities share the SQLite versioned-state database with execution:
+
+```mermaid
+flowchart TD
+    Guard["Input, output, or tool GuardRequest"] --> Policy{"Validated P3 risk tier"}
+    Policy -->|"R0"| Allow["Execute once without approval state"]
+    Policy -->|"R1"| ReviewGate["Execute and return Reviewer requirement"]
+    Policy -->|"R2"| Pause["Persist exact guard_approval: entity in shared SQLite state DB"]
+    Policy -->|"R3"| Deny["Deny by default before effect"]
+    Pause --> Owner{"Typed caller owner decision"}
+    Owner -->|"Denied"| Stop["Do not execute"]
+    Owner -->|"Approved"| Exact{"Request and permission still exact?"}
+    Exact -->|"No"| Mismatch["Reject; keep approval unconsumed"]
+    Exact -->|"Yes"| Consume["Consume approval with CAS"]
+    Consume --> Effect["Invoke closure at most once"]
+    Effect --> Downstream["Return Reviewer and Auditor requirements for P4"]
 ```
 
 **Authority boundary:** JSONL is authoritative for orchestration events, replay,
 run status, evidence, and the Coordinator final response. SQLite is authoritative
 for execution claims, leases, retries, cancellation, idempotency, revisions, and
-write ownership. The stores are not one transaction. A SQLite claim may show
-`running` while JSONL still shows `pending`; the combined view exposes both and
-does not declare either stale.
+write ownership. The approval ledger is authoritative for exact R2 requests,
+caller decisions, and consumption. Execution uses `execution_run:` entities and
+approval uses `guard_approval:` entities in the same SQLite versioned-state
+database. These are three logical authorities over two durable media. Current
+APIs expose no combined execution-plus-approval transaction. JSONL and SQLite
+have no cross-medium transaction, outbox, projection, or reconciliation
+guarantee. A SQLite execution entity may show `running` while JSONL still shows
+`pending` and approval remains independently `pending`; the APIs expose those
+states without declaring any stale.
+
+`ApprovalAuthority::ExplicitOwner` is a typed caller assertion, not
+authentication, tenancy, credential, session, or identity proof. Reviewer and
+Auditor requirements are returned for downstream P4 completion enforcement; P3
+does not claim those evidence decisions have occurred. Approval is consumed
+before the effect closure, and consumption is not atomic with an external side
+effect. Failure or panic after consumption can leave no external effect under the
+documented at-most-once/no-retry boundary.
 
 **Recovery:** `create_run` writes no SQLite state. If the process stops after the
 planned JSONL run is durable, the missing execution run is a recoverable gap.
@@ -556,7 +591,11 @@ broken event links, invalid transitions, unattached completion evidence, a
 specialist final response, bootstrap identity/status mismatch, corrupt execution
 state, or an existing SQLite definition conflict fail explicitly. A storage
 error during the four sequential JSONL appends can leave a replayable partial
-run. P2C includes no lifecycle append wrapper, projection, or outbox.
+run. Invalid R2 definitions deny or conflict before the effect; request or
+permission mismatch cannot resume; R3 denies before the effect. P3 includes no
+live HTTP, provider, service, authentication, or credential wiring. It adds no
+combined execution-plus-approval transaction, and JSONL/SQLite have no
+cross-medium transaction, projection, reconciliation, or outbox wiring.
 
 **Evidence:** `rust/ovca-langgraph/src/goal_runtime.rs`,
 `rust/ovca-runtime-core/src/replay.rs`,
@@ -648,7 +687,11 @@ and `healthy: false`.
 - Team aggregation preserves partial responses and reports offline roles.
 - The durable goal runtime schedules, persists, and replays library-owned run
   events while preserving Coordinator final-answer ownership, and explicitly
-  bootstraps an independent SQLite execution authority.
+  bootstraps an independent SQLite execution authority. Its P3 guard executes R0,
+  pauses all applicable R2 paths, denies R3 by default, and consumes an exact
+  approved resume at most once across independent runtime instances. Execution
+  and approval remain separate logical authorities through distinct entity
+  namespaces in one shared SQLite versioned-state database.
 - The public startup does not launch the LangGraph, runtime guard, or brain
   libraries as independent services.
 
@@ -677,6 +720,7 @@ and `healthy: false`.
 | Role registration and calls | Rust tests in each role-server crate |
 | Route, grade, rewrite, and fallback behavior | Rust tests in `ovca-langgraph` |
 | Goal scheduling, durable append, and replay | Rust tests in `ovca-types`, `ovca-storage`, `ovca-runtime-core`, and `ovca-langgraph` |
+| P3 risk matrix, durable approval reopen, mismatch, and at-most-once resume | Rust tests in `ovca-runtime-core` and `ovca-langgraph` |
 | Policy Tool behavior | Rust package tests and Python policy tests |
 | Rust/Python parity | `scripts/tests/test_policy_tools_rust_parity.py` |
 | Cognitive advisory helpers | `scripts/tests/test_cognitive_leadership_tools.py` |

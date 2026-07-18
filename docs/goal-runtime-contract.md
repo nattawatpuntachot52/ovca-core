@@ -6,13 +6,14 @@ The goal runtime contract is `contract_available` in `ovca-types`. Versioned
 Rust and JSON models plus a pure run-state transition validator are available to
 embedding callers.
 
-P1 and P2 consume those contracts through a `runtime_wired`, library-only path. It can
-schedule tasks, append strict run events under an external root, validate an
-event chain, deterministically replay a `RunRecord`, and maintain an independent
-SQLite execution lifecycle with leases and write ownership. This is not a
-service: startup does not launch it and no HTTP endpoint exposes it. It does not
-invoke workers, request live approvals, perform reviews or audits, call
-providers, or authorize external side effects.
+P1 through P3 consume those contracts through a `runtime_wired`, library-only
+path. It can schedule tasks, append strict run events under an external root,
+validate an event chain, deterministically replay a `RunRecord`, maintain an
+independent SQLite execution lifecycle, and guard effect closures through a
+durable approval ledger. This is not a service: startup does not launch it and
+no HTTP endpoint exposes it. It does not invoke workers, authenticate owner
+identity, perform Reviewer or Auditor evidence decisions, call providers, or
+wire external side effects.
 
 ## Contract version
 
@@ -69,9 +70,38 @@ version. Tagged enums are governed by the version of their containing contract.
 `PermissionProfile` carries the declared resource and write keys plus explicit
 `approval_required`, `review_required`, and `audit_required` flags. The flags are
 independent: `approval_required` alone never selects a review or audit completion
-gate. The contract and P1 kernel neither derive authority from a tier nor approve
-or execute an action. A later risk-policy layer must select, validate, and
-enforce the profile before effects.
+gate. P3 deterministically validates these declarations before an effect closure.
+
+## P3 guard and approval contract
+
+P3 evaluates `GuardRequest` values on `input`, `output`, and `tool` surfaces.
+Each request binds a contract version, request ID, operation label, side-effect
+class, resource keys, write keys, and exact `PermissionProfile`.
+
+| Tier | P3 execution result | Durable approval state |
+|---|---|---|
+| `r0` | Execute immediately when the request is valid | None |
+| `r1` | Execute immediately and return the Reviewer requirement | None |
+| `r2` | Pause before the closure; require exact owner approval | Pending, approved/denied, then consumed on approved resume |
+| `r3` | Deny before the closure | None; deny-by-default |
+
+R2 applies to repository writes, network actions, publication, and external side
+effects across all three guard surfaces. Network, publication, and external-side-
+effect requests also require the Auditor declaration. The durable record includes
+the exact request and required gates, so changed request or permission data cannot
+resume an existing approval.
+
+`ApprovalAuthority::ExplicitOwner` is a typed assertion supplied by the caller.
+It is not authentication, tenancy, credential, session, or identity proof. P3
+consumes an approved record with compare-and-swap before calling the effect
+closure. Reviewer and Auditor requirements are returned to the caller for
+downstream completion enforcement and P4; P3 does not claim those reviews have
+occurred.
+
+Approval consumption and an external side effect are not one transaction. If the
+effect fails or panics after consumption, the request remains consumed and the
+external effect may be absent. This is an explicit at-most-once/no-retry boundary.
+R3 remains deny-by-default in P3.
 
 ## Run states
 
@@ -164,7 +194,12 @@ outputs, and the optional Coordinator final response.
 
 JSONL assumes one writer per run. SQLite is the separate P2 authority for claim,
 lease, compare-and-swap revision, heartbeat, retry, cancellation, idempotency,
-and write ownership. `DurableGoalRuntime::new` opens neither store.
+and write ownership. The P3 approval ledger is a third logical authority for
+exact guard requests, caller-supplied decisions, and approval consumption.
+Execution records use the `execution_run:` entity namespace and approval records
+use `guard_approval:` in the same SQLite versioned-state database. Together with
+JSONL orchestration, these are three logical authorities over two durable media.
+`DurableGoalRuntime::new` touches neither durable medium.
 `create_run` still writes only the validated planned JSONL events.
 `initialize_execution` first reloads and replays that run, validates the goal,
 exact declared task ID set, task statuses, and reproduced plan, and only then
@@ -172,13 +207,21 @@ idempotently initializes SQLite. `load_runtime_view` validates shared run, goal,
 and task-set identity and returns both authorities without requiring their task
 statuses to remain equal.
 
-The JSONL and SQLite operations are not one transaction. A crash after
-`create_run` but before SQLite initialization leaves an explicit, recoverable
-bootstrap gap. Retrying `initialize_execution` with the identical task
-definition and retry budget either creates revision zero or returns the existing
-state. A failure between the four JSONL bootstrap appends can still leave a valid
-partial event stream; P1 does not repair it automatically. P2C adds no lifecycle
-event projection or outbox.
+`DurableGoalRuntime` also exposes typed wrappers for guard evaluation and record,
+guarded execution, decision recording, strict approval loading, and exact
+approved resume. These wrappers preserve `DurableApprovalError` and
+`GuardedExecution` semantics. Guard operations do not project `RunStatus` or
+`TaskStatus`, and lifecycle operations do not mutate approval state.
+
+Current APIs expose no combined transaction across execution and approval entity
+operations in the shared SQLite database. JSONL and SQLite operations are not one
+cross-medium transaction and have no outbox, reconciliation, or atomicity claim.
+A crash after `create_run` but before SQLite initialization leaves an explicit,
+recoverable bootstrap gap. Retrying `initialize_execution` with the identical
+task definition and retry budget either creates revision zero or returns the
+existing state. A failure between the four JSONL bootstrap appends can still
+leave a valid partial event stream; P1 does not repair it automatically. P2C adds
+no lifecycle event projection or outbox.
 
 ## Verification surface
 
@@ -188,6 +231,8 @@ completion gates, and required evidence. `ovca-runtime-core` tests cover golden
 scheduling, final-answer ownership, event-chain integrity, replay, and durable
 reopen equivalence. `ovca-langgraph` tests cover deterministic bootstrap,
 contract-version rejection, validate-before-append behavior, strict reload,
-two-store recovery and idempotency, independent status views, path-safe IDs, and
-Coordinator-only final responses. See
+two-store recovery and idempotency, R0 execution without approval state, all 12
+R2 pause paths, all 12 R3 deny paths, durable reopen, request and permission
+mismatch, exact concurrent at-most-once resume, logical-authority independence,
+path-safe IDs, and Coordinator-only final responses. See
 [durable orchestration runtime](orchestration-runtime.md) for the workflow map.

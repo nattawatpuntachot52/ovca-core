@@ -9,18 +9,26 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+pub mod durable_guardrails;
 pub mod execution_lifecycle;
 pub mod finalization;
+pub mod guardrails;
 pub mod replay;
 pub mod scheduler;
 pub mod sqlite_execution;
 
+pub use durable_guardrails::{
+    ApprovalEnvelope, ApprovalStateCorruption, DurableApprovalError, DurableApprovalEvaluation,
+    DurableApprovalRecord, DurableDecisionResult, DurableGuardrailAuthority, GuardedExecution,
+    DEFAULT_APPROVAL_CAS_RETRY_LIMIT,
+};
 pub use execution_lifecycle::{
     CancellationRequest, ClaimRequest, CompletionRequest, ExecutionLifecycleError,
     ExecutionLifecycleKernel, ExecutionLifecycleRestoreError, ExecutionLifecycleSnapshot,
     FailureRequest, HeartbeatRequest, TaskExecutionSnapshot, WriteKeyOwner,
 };
 pub use finalization::{FinalizationError, FinalizationKernel};
+pub use guardrails::{evaluate_guard_request, GuardEvaluationContext};
 pub use replay::{replay_run, validate_event_chain, ReplayError, ReplayedRun};
 pub use scheduler::{schedule_tasks, ScheduleError};
 pub use sqlite_execution::{

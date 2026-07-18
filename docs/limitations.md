@@ -2,14 +2,17 @@
 
 - This is a development distribution, not a hosted or hardened service.
 - No private memory or historical dataset is bundled.
-- News ingestion and legacy Aurora, Divina, and Hope servers are excluded.
+- News ingestion and legacy role servers are excluded.
 - Legacy agent enum values remain only for serialized-data compatibility and
   have no public port or routing registration.
 - Policy Tools produce structured guidance; most are not runtime hard gates.
 - The runtime does not provide authentication, tenancy, or encrypted storage.
 - The durable goal runtime is library-only. JSONL orchestration remains a
   single-writer-per-run caller obligation; SQLite provides the P2 execution
-  lease and write-ownership authority.
+  lease and write-ownership authority, and the P3 approval ledger separately
+  owns approval state and consumption. Execution and approval use separate
+  `execution_run:` and `guard_approval:` entity namespaces in the same SQLite
+  versioned-state database.
 - Planned-run bootstrap events are synced one JSONL line at a time. A storage
   failure between lines can leave a replayable partial bootstrap that requires
   caller-managed recovery.
@@ -21,5 +24,17 @@
   yet; the SQLite authority has independent-connection concurrency coverage.
 - There is no JSONL projection or outbox for SQLite claim, heartbeat, retry,
   completion, or cancellation lifecycle changes yet.
+- `ApprovalAuthority::ExplicitOwner` is a caller assertion, not authentication,
+  tenancy, credential, or identity proof.
+- R2 approval is consumed before the effect closure. Consumption and an external
+  side effect are not one transaction; failure or panic after consumption is
+  at-most-once/no-retry and can leave no external effect.
+- Reviewer and Auditor requirements are returned to downstream completion
+  enforcement. P3 does not implement their evidence decisions; that is P4 work.
+- The APIs expose no combined execution-plus-approval transaction in shared
+  SQLite. JSONL and SQLite are the two durable media and have no cross-medium
+  transaction, outbox, projection, or reconciliation guarantee.
+- R3 is denied by default. P3 has no live HTTP, provider, service, authentication,
+  or credential wiring.
 - No live worker or provider integration validates the durable execution path.
 - No trading, broker, order-routing, or capital-movement capability is enabled.

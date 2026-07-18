@@ -1,12 +1,15 @@
 use chrono::{DateTime, Utc};
 use ovca_runtime_core::{
-    replay_run, schedule_tasks, DurableExecutionAuthority, DurableExecutionError,
-    InitializeRunResult, LoadedExecutionRun, ReplayError, ReplayedRun, ScheduleError,
+    replay_run, schedule_tasks, DurableApprovalError, DurableApprovalEvaluation,
+    DurableApprovalRecord, DurableDecisionResult, DurableExecutionAuthority, DurableExecutionError,
+    DurableGuardrailAuthority, GuardEvaluationContext, GuardedExecution, InitializeRunResult,
+    LoadedExecutionRun, ReplayError, ReplayedRun, ScheduleError, DEFAULT_APPROVAL_CAS_RETRY_LIMIT,
 };
 use ovca_storage::{RunEventLog, RunEventLogError};
 use ovca_types::{
-    ContractVersion, EventId, ExecutionPlan, GoalContract, GoalId, RetryBudget, Role, RunEvent,
-    RunEventPayload, RunId, RunStatus, Task, TaskId, TaskStatus,
+    ApprovalDecisionRecord, ApprovalRequestId, ContractVersion, EventId, ExecutionPlan,
+    GoalContract, GoalId, GuardRequest, RetryBudget, Role, RunEvent, RunEventPayload, RunId,
+    RunStatus, Task, TaskId, TaskStatus,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -294,16 +297,21 @@ impl From<RunEventLogError> for DurableGoalRuntimeError {
     }
 }
 
-/// Durable JSONL orchestration and SQLite execution wrapper for validated goal runs.
+/// Durable orchestration, execution, and guardrail wrapper for validated goal runs.
 ///
 /// JSONL create, append, and transition methods remain caller-serialized or
 /// single-writer per run. Claim, lease, CAS, and concurrency guarantees are
-/// provided only through the SQLite execution authority methods. Public
+/// provided only through the SQLite execution authority methods. Execution and
+/// approval records use separate entity namespaces in the same SQLite
+/// versioned-state database. The three logical authorities span two durable
+/// media: JSONL and SQLite. Current APIs expose no combined execution-plus-
+/// approval transaction, and JSONL/SQLite do not form one transaction. Public
 /// assignment and event-producer identities remain the role-only [`Role`] surface.
 #[derive(Debug, Clone)]
 pub struct DurableGoalRuntime {
     log: RunEventLog,
     execution: DurableExecutionAuthority,
+    guardrails: DurableGuardrailAuthority,
 }
 
 impl DurableGoalRuntime {
@@ -314,6 +322,7 @@ impl DurableGoalRuntime {
         Self {
             log: RunEventLog::new(root),
             execution: DurableExecutionAuthority::new(root),
+            guardrails: DurableGuardrailAuthority::new(root, DEFAULT_APPROVAL_CAS_RETRY_LIMIT),
         }
     }
 
@@ -330,6 +339,75 @@ impl DurableGoalRuntime {
     /// Returns the fixed SQLite path used by the execution authority.
     pub fn execution_database_path(&self) -> std::path::PathBuf {
         self.execution.database_path()
+    }
+
+    /// Returns the durable guardrail authority without opening the shared SQLite database.
+    ///
+    /// Execution and approval use separate entity namespaces in the same SQLite
+    /// versioned-state database. Current APIs expose no combined transaction for
+    /// those logical authorities, and JSONL/SQLite have no cross-medium transaction.
+    pub fn guardrail_authority(&self) -> &DurableGuardrailAuthority {
+        &self.guardrails
+    }
+
+    /// Evaluates a guard request and durably records an R2 pause when required.
+    pub fn evaluate_guard_and_record(
+        &self,
+        request: &GuardRequest,
+        context: &GuardEvaluationContext,
+    ) -> Result<DurableApprovalEvaluation, DurableApprovalError> {
+        self.guardrails.evaluate_and_record(request, context)
+    }
+
+    /// Executes an allowed effect, records an R2 pause, or returns an R3 denial.
+    pub fn execute_guarded<T, E, F>(
+        &self,
+        request: &GuardRequest,
+        context: &GuardEvaluationContext,
+        effect: F,
+    ) -> Result<GuardedExecution<T, E>, DurableApprovalError>
+    where
+        F: FnOnce() -> Result<T, E>,
+    {
+        self.guardrails.execute_guarded(request, context, effect)
+    }
+
+    /// Records a typed caller-supplied owner decision for one exact request.
+    ///
+    /// `ApprovalAuthority::ExplicitOwner` is a caller assertion. This library
+    /// does not authenticate an identity, credential, tenant, or session.
+    pub fn record_approval_decision(
+        &self,
+        decision: ApprovalDecisionRecord,
+    ) -> Result<DurableDecisionResult, DurableApprovalError> {
+        self.guardrails.record_decision(decision)
+    }
+
+    /// Strictly loads and validates one durable approval record.
+    pub fn load_approval(
+        &self,
+        approval_request_id: &ApprovalRequestId,
+    ) -> Result<DurableApprovalRecord, DurableApprovalError> {
+        self.guardrails.load(approval_request_id)
+    }
+
+    /// Consumes an exact approved request before invoking its effect closure.
+    ///
+    /// Consumption and an external effect are not one transaction. Failure or
+    /// panic after consumption is at-most-once/no-retry and may leave no effect.
+    /// Reviewer and Auditor requirements are returned for downstream P4
+    /// completion enforcement; P3 does not satisfy those requirements.
+    pub fn resume_approved<T, E, F>(
+        &self,
+        approval_request_id: &ApprovalRequestId,
+        request: &GuardRequest,
+        effect: F,
+    ) -> Result<GuardedExecution<T, E>, DurableApprovalError>
+    where
+        F: FnOnce() -> Result<T, E>,
+    {
+        self.guardrails
+            .resume_approved(approval_request_id, request, effect)
     }
 
     /// Validates and durably creates a planned run from exactly four bootstrap
@@ -359,7 +437,7 @@ impl DurableGoalRuntime {
     /// independent SQLite execution authority.
     ///
     /// JSONL validation completes before the first possible SQLite write. The
-    /// two stores do not form one transaction.
+    /// two durable media do not form one transaction.
     pub fn initialize_execution(
         &self,
         run_id: &RunId,
@@ -761,11 +839,16 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use ovca_runtime_core::ClaimRequest;
+    use ovca_storage::VERSIONED_STATE_DB_RELATIVE_PATH;
     use ovca_types::{
-        CompletionPrecondition, CoordinatorFinalResponse, ExecutionMode, LeaseId,
-        PermissionProfile, ProjectId, RiskTier, SpecialistOutput, WorkerId,
+        ApprovalAuthority, ApprovalDisposition, ApprovalState, CompletionPrecondition,
+        CoordinatorFinalResponse, ExecutionMode, GuardRequestId, GuardSurface, LeaseId,
+        PermissionProfile, ProjectId, RiskTier, SideEffectClass, SpecialistOutput, WorkerId,
     };
     use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::thread;
     use tempfile::TempDir;
 
     fn timestamp(second: u32) -> DateTime<Utc> {
@@ -853,6 +936,76 @@ mod tests {
             producer_role,
             payload,
             metadata: BTreeMap::new(),
+        }
+    }
+
+    fn guard_context(id: impl Into<String>) -> GuardEvaluationContext {
+        GuardEvaluationContext {
+            approval_request_id: ApprovalRequestId::new(id),
+            requested_at: timestamp(20),
+        }
+    }
+
+    fn guard_request(
+        id: impl Into<String>,
+        surface: GuardSurface,
+        side_effect: SideEffectClass,
+    ) -> GuardRequest {
+        let risk_tier = match side_effect {
+            SideEffectClass::ReadOnly => RiskTier::R0,
+            SideEffectClass::ReversibleLocalWrite => RiskTier::R1,
+            SideEffectClass::RepositoryWrite
+            | SideEffectClass::NetworkAction
+            | SideEffectClass::Publication
+            | SideEffectClass::ExternalSideEffect => RiskTier::R2,
+            SideEffectClass::Destructive
+            | SideEffectClass::SecretBearing
+            | SideEffectClass::Irreversible
+            | SideEffectClass::Privileged => RiskTier::R3,
+        };
+        let write_keys = if side_effect == SideEffectClass::ReadOnly {
+            Vec::new()
+        } else {
+            vec!["write:runtime".to_owned()]
+        };
+        let audit_required = risk_tier == RiskTier::R2
+            && matches!(
+                side_effect,
+                SideEffectClass::NetworkAction
+                    | SideEffectClass::Publication
+                    | SideEffectClass::ExternalSideEffect
+            );
+        GuardRequest {
+            contract_version: ContractVersion::current(),
+            id: GuardRequestId::new(id),
+            surface,
+            side_effect,
+            operation_label: "guarded runtime operation".to_owned(),
+            resource_keys: vec!["resource:runtime".to_owned()],
+            write_keys: write_keys.clone(),
+            permission_profile: PermissionProfile {
+                contract_version: ContractVersion::current(),
+                risk_tier,
+                resource_keys: vec!["resource:runtime".to_owned()],
+                write_keys,
+                approval_required: risk_tier == RiskTier::R2,
+                review_required: matches!(risk_tier, RiskTier::R1 | RiskTier::R2),
+                audit_required,
+            },
+        }
+    }
+
+    fn owner_decision(
+        approval_request_id: &ApprovalRequestId,
+        request: &GuardRequest,
+    ) -> ApprovalDecisionRecord {
+        ApprovalDecisionRecord {
+            contract_version: ContractVersion::current(),
+            approval_request_id: approval_request_id.clone(),
+            guard_request_id: request.id.clone(),
+            authority: ApprovalAuthority::ExplicitOwner,
+            disposition: ApprovalDisposition::Approved,
+            decided_at: timestamp(21),
         }
     }
 
@@ -1137,7 +1290,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_constructor_is_side_effect_free_for_both_stores() {
+    fn durable_constructor_is_side_effect_free_for_all_authorities_and_media() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().join("runtime-root");
         let runtime = DurableGoalRuntime::new(&root);
@@ -1145,6 +1298,286 @@ mod tests {
         assert!(!root.exists());
         assert!(!runtime.log_path().exists());
         assert!(!runtime.execution_database_path().exists());
+        assert!(!root.join(VERSIONED_STATE_DB_RELATIVE_PATH).exists());
+        let _ = runtime.guardrail_authority();
+    }
+
+    #[test]
+    fn r0_executes_once_without_creating_approval_state() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("runtime-root");
+        let runtime = DurableGoalRuntime::new(&root);
+        let calls = AtomicUsize::new(0);
+        let result = runtime
+            .execute_guarded(
+                &guard_request("guard-r0", GuardSurface::Input, SideEffectClass::ReadOnly),
+                &guard_context("approval-r0"),
+                || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, ()>("executed")
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(
+            result,
+            GuardedExecution::Executed {
+                output: "executed",
+                ..
+            }
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(!root.exists());
+        assert!(!root.join(VERSIONED_STATE_DB_RELATIVE_PATH).exists());
+    }
+
+    #[test]
+    fn every_r2_surface_and_side_effect_pauses_before_execution() {
+        let dir = TempDir::new().unwrap();
+        let runtime = DurableGoalRuntime::new(dir.path());
+        let calls = AtomicUsize::new(0);
+        let mut paused = 0;
+
+        for surface in [
+            GuardSurface::Input,
+            GuardSurface::Output,
+            GuardSurface::Tool,
+        ] {
+            for side_effect in [
+                SideEffectClass::RepositoryWrite,
+                SideEffectClass::NetworkAction,
+                SideEffectClass::Publication,
+                SideEffectClass::ExternalSideEffect,
+            ] {
+                let suffix = format!("{surface:?}-{side_effect:?}");
+                let result = runtime
+                    .execute_guarded(
+                        &guard_request(format!("guard-{suffix}"), surface, side_effect),
+                        &guard_context(format!("approval-{suffix}")),
+                        || {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            Ok::<_, ()>(())
+                        },
+                    )
+                    .unwrap();
+                assert!(matches!(result, GuardedExecution::PausedForApproval { .. }));
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                paused += 1;
+            }
+        }
+
+        assert_eq!(paused, 12);
+    }
+
+    #[test]
+    fn every_r3_surface_denies_before_execution() {
+        let dir = TempDir::new().unwrap();
+        let runtime = DurableGoalRuntime::new(dir.path());
+        let calls = AtomicUsize::new(0);
+        let mut denied = 0;
+
+        for surface in [
+            GuardSurface::Input,
+            GuardSurface::Output,
+            GuardSurface::Tool,
+        ] {
+            for side_effect in [
+                SideEffectClass::Destructive,
+                SideEffectClass::SecretBearing,
+                SideEffectClass::Irreversible,
+                SideEffectClass::Privileged,
+            ] {
+                let suffix = format!("{surface:?}-{side_effect:?}");
+                let result = runtime
+                    .execute_guarded(
+                        &guard_request(format!("guard-{suffix}"), surface, side_effect),
+                        &guard_context(format!("approval-{suffix}")),
+                        || {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            Ok::<_, ()>(())
+                        },
+                    )
+                    .unwrap();
+                assert!(matches!(result, GuardedExecution::DeniedByPolicy { .. }));
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                denied += 1;
+            }
+        }
+
+        assert_eq!(denied, 12);
+        assert!(!dir.path().join(VERSIONED_STATE_DB_RELATIVE_PATH).exists());
+    }
+
+    #[test]
+    fn pending_approval_reopens_and_concurrent_exact_resume_executes_once() {
+        let dir = TempDir::new().unwrap();
+        let request = guard_request(
+            "guard-r2",
+            GuardSurface::Tool,
+            SideEffectClass::NetworkAction,
+        );
+        let approval_id = ApprovalRequestId::from("approval-r2");
+        let runtime = DurableGoalRuntime::new(dir.path());
+        let paused = runtime
+            .execute_guarded(&request, &guard_context(approval_id.0.clone()), || {
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert!(matches!(paused, GuardedExecution::PausedForApproval { .. }));
+        drop(runtime);
+
+        let reopened = DurableGoalRuntime::new(dir.path());
+        assert_eq!(
+            reopened.load_approval(&approval_id).unwrap().envelope.state,
+            ApprovalState::Pending
+        );
+        reopened
+            .record_approval_decision(owner_decision(&approval_id, &request))
+            .unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let root = dir.path().to_path_buf();
+            let request = request.clone();
+            let approval_id = approval_id.clone();
+            let calls = Arc::clone(&calls);
+            handles.push(thread::spawn(move || {
+                DurableGoalRuntime::new(root)
+                    .resume_approved(&approval_id, &request, || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap()
+            }));
+        }
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, GuardedExecution::Executed { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, GuardedExecution::AlreadyConsumed { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn request_and_permission_mismatches_cannot_resume_or_consume() {
+        let dir = TempDir::new().unwrap();
+        let runtime = DurableGoalRuntime::new(dir.path());
+        let request = guard_request(
+            "guard-r2",
+            GuardSurface::Tool,
+            SideEffectClass::RepositoryWrite,
+        );
+        let approval_id = ApprovalRequestId::from("approval-r2");
+        runtime
+            .evaluate_guard_and_record(&request, &guard_context(approval_id.0.clone()))
+            .unwrap();
+        runtime
+            .record_approval_decision(owner_decision(&approval_id, &request))
+            .unwrap();
+
+        let calls = AtomicUsize::new(0);
+        let mut changed_request = request.clone();
+        changed_request.operation_label = "different operation".to_owned();
+        let mut changed_permission = request.clone();
+        changed_permission
+            .permission_profile
+            .write_keys
+            .push("write:other".to_owned());
+        for mismatch in [&changed_request, &changed_permission] {
+            assert!(matches!(
+                runtime.resume_approved(&approval_id, mismatch, || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, ()>(())
+                }),
+                Err(DurableApprovalError::RequestMismatch { .. })
+            ));
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            runtime.load_approval(&approval_id).unwrap().envelope.state,
+            ApprovalState::Approved
+        );
+    }
+
+    #[test]
+    fn logical_authority_states_remain_independent() {
+        let dir = TempDir::new().unwrap();
+        let goal = goal();
+        let tasks = vec![task("task-a", &[])];
+        let runtime = DurableGoalRuntime::new(dir.path());
+        runtime
+            .create_run(RunId::from("run-1"), &goal, &tasks, stamps())
+            .unwrap();
+        runtime
+            .initialize_execution(
+                &RunId::from("run-1"),
+                &goal,
+                &tasks,
+                RetryBudget {
+                    contract_version: ContractVersion::current(),
+                    max_attempts: 2,
+                },
+            )
+            .unwrap();
+        let guarded = guard_request(
+            "guard-r2",
+            GuardSurface::Tool,
+            SideEffectClass::RepositoryWrite,
+        );
+        let approval_id = ApprovalRequestId::from("approval-r2");
+        runtime
+            .evaluate_guard_and_record(&guarded, &guard_context(approval_id.0.clone()))
+            .unwrap();
+        runtime
+            .execution_authority()
+            .claim(
+                &RunId::from("run-1"),
+                ClaimRequest {
+                    task_id: TaskId::from("task-a"),
+                    worker_id: WorkerId::from("worker-1"),
+                    worker_role: Role::Engineer,
+                    lease_id: LeaseId::from("lease-1"),
+                    now: timestamp(4),
+                    expires_at: timestamp(5),
+                },
+            )
+            .unwrap();
+
+        let view = runtime
+            .load_runtime_view(&RunId::from("run-1"), &goal)
+            .unwrap();
+        assert_eq!(view.orchestration.run_record.status, RunStatus::Planned);
+        assert_eq!(
+            view.orchestration.task_statuses[&TaskId::from("task-a")],
+            TaskStatus::Pending
+        );
+        assert_eq!(
+            view.execution.envelope.snapshot.tasks[&TaskId::from("task-a")].status,
+            TaskStatus::Running
+        );
+        assert_eq!(
+            runtime.load_approval(&approval_id).unwrap().envelope.state,
+            ApprovalState::Pending
+        );
+        assert!(runtime.log_path().exists());
+        assert!(runtime.execution_database_path().exists());
+        assert!(dir.path().join(VERSIONED_STATE_DB_RELATIVE_PATH).exists());
     }
 
     #[test]

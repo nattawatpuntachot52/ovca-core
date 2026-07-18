@@ -30,7 +30,9 @@ flowchart LR
     App -.-> GoalRuntime["Durable goal runtime library"]
     Graph -.-> Services
     GoalRuntime -.-> RunLog["JSONL orchestration evidence"]
-    GoalRuntime -.-> ExecutionDb["SQLite execution authority"]
+    GoalRuntime -.-> StateDb["SQLite versioned-state database"]
+    StateDb --> ExecutionNs["execution_run: lifecycle namespace"]
+    StateDb --> ApprovalNs["guard_approval: ledger namespace"]
 ```
 
 The startup script runs Policy Tools plus four role services. Coordinator can
@@ -44,7 +46,13 @@ versioned goal and task contracts, creates deterministic sequential or parallel
 plans, persists linked run events under a caller-supplied external root, and
 replays them into a `RunRecord`. An explicit, idempotent P2 bootstrap validates
 that planned JSONL state before initializing SQLite execution leases and write
-ownership. The stores are independent and are not one transaction. Coordinator
+ownership. P3 adds deterministic input, output, and tool guards plus a durable
+pause/decision/resume boundary for sensitive R2 operations; R3 is denied by
+default. Orchestration, execution lifecycle, and approval are three logical
+authorities over two durable media: JSONL and one shared SQLite versioned-state
+database. Execution and approval use separate entity namespaces in that database.
+The APIs expose no combined execution-plus-approval transaction, and JSONL and
+SQLite have no cross-medium transaction, outbox, or reconciliation. Coordinator
 is the only role allowed to record the final response.
 
 Read the [workflow-by-workflow system guide](docs/system-workflows.md) for inputs,
@@ -113,8 +121,8 @@ runtime callers and blocking tests prove stronger authority.
 ## Project status
 
 OVCA Core is an early public development distribution. APIs and data contracts
-may change. Legacy Aurora, Divina, and Hope enum values exist only to read old
-serialized records; they are inactive, unregistered, and have no public ports.
+may change. Legacy enum values exist only to read old serialized records; they
+are inactive, unregistered, and have no public ports.
 
 The provider-independent goal runtime version 1 contracts are
 `contract_available` in `ovca-types` and `runtime_wired` through library-only
@@ -122,8 +130,14 @@ paths in `ovca-storage`, `ovca-runtime-core`, and `ovca-langgraph`. JSONL is the
 P1 orchestration and replay-evidence authority. SQLite is the P2 execution lease,
 retry, cancellation, idempotency, and write-ownership authority. The runtime is
 not startup-wired or HTTP-exposed, and it does not invoke live workers or a
-provider. Explicit review and audit flags select whether valid completion
-evidence is accepted from `running`, `reviewing`, or `auditing`; approval alone
-does not select those gates.
+provider. The P3 approval ledger is a third logical authority. It uses the
+`guard_approval:` namespace in the same SQLite versioned-state database as the P2
+`execution_run:` lifecycle namespace. Current APIs expose no combined
+execution-plus-approval transaction. R2 owner approval is consumed before the
+effect closure, while Reviewer and Auditor requirements are returned for
+downstream enforcement rather than completed by P3. An `ExplicitOwner` value is
+a typed caller assertion, not authentication or identity proof. Explicit review
+and audit flags select whether valid completion evidence is accepted from
+`running`, `reviewing`, or `auditing`; approval alone does not select those gates.
 
 Licensed under Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
