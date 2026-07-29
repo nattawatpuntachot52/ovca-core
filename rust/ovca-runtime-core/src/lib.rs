@@ -14,6 +14,7 @@ pub mod execution_lifecycle;
 pub mod finalization;
 pub mod guardrails;
 pub mod replay;
+pub mod review_audit;
 pub mod scheduler;
 pub mod sqlite_execution;
 
@@ -30,6 +31,12 @@ pub use execution_lifecycle::{
 pub use finalization::{FinalizationError, FinalizationKernel};
 pub use guardrails::{evaluate_guard_request, GuardEvaluationContext};
 pub use replay::{replay_run, validate_event_chain, ReplayError, ReplayedRun};
+pub use review_audit::{
+    derive_review_audit_policy, evaluate_review_audit, validate_audit_decision,
+    validate_review_decision, AuditDecisionValidationContext, ReviewAuditError,
+    ReviewAuditEvaluationContext, ReviewAuditPolicy, ReviewDecisionValidationContext,
+    ValidatedAuditDecision, ValidatedReviewDecision,
+};
 pub use scheduler::{schedule_tasks, ScheduleError};
 pub use sqlite_execution::{
     DurableCommandResult, DurableExecutionAuthority, DurableExecutionError, ExecutionRunEnvelope,

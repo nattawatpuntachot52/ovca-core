@@ -841,9 +841,12 @@ mod tests {
     use ovca_runtime_core::ClaimRequest;
     use ovca_storage::VERSIONED_STATE_DB_RELATIVE_PATH;
     use ovca_types::{
-        ApprovalAuthority, ApprovalDisposition, ApprovalState, CompletionPrecondition,
-        CoordinatorFinalResponse, ExecutionMode, GuardRequestId, GuardSurface, LeaseId,
-        PermissionProfile, ProjectId, RiskTier, SideEffectClass, SpecialistOutput, WorkerId,
+        ApprovalAuthority, ApprovalDisposition, ApprovalState, AuditDecision, AuditDecisionId,
+        CompletionEvidence, CompletionPrecondition, CoordinatorFinalResponse, CriterionAssessment,
+        CriterionAssessmentVerdict, CriterionKind, EvidenceId, EvidenceKind, EvidenceRef,
+        ExecutionMode, GuardRequestId, GuardRequirement, GuardSurface, LeaseId, PermissionProfile,
+        ProjectId, ReviewAuditRequirements, ReviewAuditResolution, ReviewDecision,
+        ReviewDecisionId, ReviewVerdict, RiskTier, SideEffectClass, SpecialistOutput, WorkerId,
     };
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -937,6 +940,202 @@ mod tests {
             payload,
             metadata: BTreeMap::new(),
         }
+    }
+
+    fn append_runtime_event(
+        runtime: &DurableGoalRuntime,
+        goal: &GoalContract,
+        sequence: u64,
+        producer_role: Role,
+        payload: RunEventPayload,
+    ) -> Result<ReplayedRun, DurableGoalRuntimeError> {
+        let event_id = format!("event-{sequence}");
+        let previous_event_id = format!("event-{}", sequence - 1);
+        runtime.append_event(
+            appended_event(
+                &event_id,
+                sequence,
+                &previous_event_id,
+                producer_role,
+                payload,
+            ),
+            goal,
+        )
+    }
+
+    fn review_audit_goal() -> GoalContract {
+        let mut goal = goal();
+        goal.objective = "complete only after evidence-backed review and audit".to_owned();
+        goal.acceptance_criteria = vec!["accepted".to_owned()];
+        goal.verification_criteria = vec!["verified".to_owned()];
+        goal.definition_of_done = vec!["done".to_owned()];
+        goal.completion_precondition = CompletionPrecondition {
+            contract_version: ContractVersion::current(),
+            minimum_evidence_refs: 1,
+            require_all_acceptance_criteria: true,
+            require_all_verification_criteria: true,
+        };
+        goal
+    }
+
+    fn review_audit_evidence() -> EvidenceRef {
+        EvidenceRef {
+            contract_version: ContractVersion::current(),
+            id: EvidenceId::from("evidence-1"),
+            kind: EvidenceKind::TestResult,
+            reference: "memory://evidence/evidence-1".to_owned(),
+            producer_role: Role::Engineer,
+            integrity: None,
+            produced_at: timestamp(5),
+        }
+    }
+
+    fn completion_evidence() -> CompletionEvidence {
+        CompletionEvidence {
+            contract_version: ContractVersion::current(),
+            evidence_refs: vec![EvidenceId::from("evidence-1")],
+            satisfied_acceptance_criteria: vec!["accepted".to_owned()],
+            satisfied_verification_criteria: vec!["verified".to_owned()],
+            satisfied_definition_of_done: vec!["done".to_owned()],
+        }
+    }
+
+    fn passing_assessments() -> Vec<CriterionAssessment> {
+        [
+            (CriterionKind::Acceptance, "accepted"),
+            (CriterionKind::Verification, "verified"),
+            (CriterionKind::DefinitionOfDone, "done"),
+        ]
+        .into_iter()
+        .map(|(kind, criterion)| CriterionAssessment {
+            contract_version: ContractVersion::current(),
+            kind,
+            criterion: criterion.to_owned(),
+            verdict: CriterionAssessmentVerdict::Satisfied,
+            evidence_refs: vec![EvidenceId::from("evidence-1")],
+            rationale: "the recorded evidence satisfies the exact criterion".to_owned(),
+        })
+        .collect()
+    }
+
+    fn review_decision() -> ReviewDecision {
+        ReviewDecision {
+            contract_version: ContractVersion::current(),
+            id: ReviewDecisionId::from("review-1"),
+            run_id: RunId::from("run-1"),
+            goal_id: GoalId::from("goal-1"),
+            producer_role: Role::Reviewer,
+            verdict: ReviewVerdict::Pass,
+            assessments: passing_assessments(),
+            summary: "review passed".to_owned(),
+            decided_at: timestamp(9),
+        }
+    }
+
+    fn audit_decision(verdict: ReviewVerdict) -> AuditDecision {
+        let mut assessments = passing_assessments();
+        if verdict == ReviewVerdict::Fail {
+            assessments[0].verdict = CriterionAssessmentVerdict::Unsatisfied;
+            assessments[0].rationale = "the independent countercheck failed".to_owned();
+        }
+        AuditDecision {
+            contract_version: ContractVersion::current(),
+            id: AuditDecisionId::from("audit-1"),
+            run_id: RunId::from("run-1"),
+            goal_id: GoalId::from("goal-1"),
+            review_decision_id: ReviewDecisionId::from("review-1"),
+            producer_role: Role::Auditor,
+            verdict,
+            assessments,
+            summary: "audit completed".to_owned(),
+            decided_at: timestamp(11),
+        }
+    }
+
+    fn append_review_audit_prerequisites(
+        runtime: &DurableGoalRuntime,
+        goal: &GoalContract,
+        guard_requirements: BTreeSet<GuardRequirement>,
+    ) {
+        append_runtime_event(
+            runtime,
+            goal,
+            4,
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Planned,
+                to: RunStatus::Running,
+            },
+        )
+        .unwrap();
+        append_runtime_event(
+            runtime,
+            goal,
+            5,
+            Role::Engineer,
+            RunEventPayload::EvidenceReferenceRecorded {
+                evidence: review_audit_evidence(),
+            },
+        )
+        .unwrap();
+        append_runtime_event(
+            runtime,
+            goal,
+            6,
+            Role::Engineer,
+            RunEventPayload::CompletionEvidenceRecorded {
+                evidence: completion_evidence(),
+            },
+        )
+        .unwrap();
+        append_runtime_event(
+            runtime,
+            goal,
+            7,
+            Role::Coordinator,
+            RunEventPayload::ReviewAuditRequirementsRecorded {
+                requirements: ReviewAuditRequirements {
+                    contract_version: ContractVersion::current(),
+                    guard_requirements,
+                },
+            },
+        )
+        .unwrap();
+        append_runtime_event(
+            runtime,
+            goal,
+            8,
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Running,
+                to: RunStatus::Reviewing,
+            },
+        )
+        .unwrap();
+    }
+
+    fn append_pass_review_and_enter_auditing(runtime: &DurableGoalRuntime, goal: &GoalContract) {
+        append_runtime_event(
+            runtime,
+            goal,
+            9,
+            Role::Reviewer,
+            RunEventPayload::ReviewDecisionRecorded {
+                decision: review_decision(),
+            },
+        )
+        .unwrap();
+        append_runtime_event(
+            runtime,
+            goal,
+            10,
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Reviewing,
+                to: RunStatus::Auditing,
+            },
+        )
+        .unwrap();
     }
 
     fn guard_context(id: impl Into<String>) -> GuardEvaluationContext {
@@ -1895,6 +2094,314 @@ mod tests {
             run_id
         );
         assert!(!dir.path().join("outside").exists());
+    }
+
+    #[test]
+    fn durable_r0_completion_without_review_events_remains_compatible() {
+        let dir = TempDir::new().unwrap();
+        let goal = goal();
+        let runtime = DurableGoalRuntime::new(dir.path());
+        runtime
+            .create_run(
+                RunId::from("run-1"),
+                &goal,
+                &[task("task-a", &[])],
+                stamps(),
+            )
+            .unwrap();
+        append_runtime_event(
+            &runtime,
+            &goal,
+            4,
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Planned,
+                to: RunStatus::Running,
+            },
+        )
+        .unwrap();
+        append_runtime_event(
+            &runtime,
+            &goal,
+            5,
+            Role::Engineer,
+            RunEventPayload::EvidenceAttached {
+                evidence_id: EvidenceId::from("evidence-1"),
+            },
+        )
+        .unwrap();
+        append_runtime_event(
+            &runtime,
+            &goal,
+            6,
+            Role::Engineer,
+            RunEventPayload::CompletionEvidenceRecorded {
+                evidence: CompletionEvidence {
+                    contract_version: ContractVersion::current(),
+                    evidence_refs: vec![EvidenceId::from("evidence-1")],
+                    satisfied_acceptance_criteria: Vec::new(),
+                    satisfied_verification_criteria: Vec::new(),
+                    satisfied_definition_of_done: Vec::new(),
+                },
+            },
+        )
+        .unwrap();
+
+        let completed = append_runtime_event(
+            &runtime,
+            &goal,
+            7,
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Running,
+                to: RunStatus::Completed,
+            },
+        )
+        .expect("R0 completion should remain compatible without review events");
+
+        assert_eq!(completed.run_record.status, RunStatus::Completed);
+        assert_eq!(completed.review_audit_requirements, None);
+        assert!(completed.review_decisions.is_empty());
+        assert!(completed.audit_decisions.is_empty());
+        let reopened = DurableGoalRuntime::new(dir.path());
+        assert_eq!(
+            reopened.load_run(&RunId::from("run-1"), &goal).unwrap(),
+            completed
+        );
+    }
+
+    #[test]
+    fn durable_missing_required_review_rejects_without_changing_jsonl() {
+        let dir = TempDir::new().unwrap();
+        let goal = review_audit_goal();
+        let runtime = DurableGoalRuntime::new(dir.path());
+        runtime
+            .create_run(
+                RunId::from("run-1"),
+                &goal,
+                &[task("task-a", &[])],
+                stamps(),
+            )
+            .unwrap();
+        append_review_audit_prerequisites(
+            &runtime,
+            &goal,
+            BTreeSet::from([GuardRequirement::Reviewer]),
+        );
+        let before = fs::read(runtime.log_path()).unwrap();
+
+        let error = append_runtime_event(
+            &runtime,
+            &goal,
+            9,
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Reviewing,
+                to: RunStatus::Completed,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            DurableGoalRuntimeError::Replay {
+                source: ReplayError::ReviewAuditResolutionRejected {
+                    sequence: 9,
+                    resolution: ReviewAuditResolution::AwaitingReview,
+                }
+            }
+        ));
+        assert_eq!(fs::read(runtime.log_path()).unwrap(), before);
+        assert_eq!(
+            runtime
+                .load_run(&RunId::from("run-1"), &goal)
+                .unwrap()
+                .run_record
+                .status,
+            RunStatus::Reviewing
+        );
+    }
+
+    #[test]
+    fn durable_missing_required_audit_rejects_without_changing_jsonl() {
+        let dir = TempDir::new().unwrap();
+        let goal = review_audit_goal();
+        let runtime = DurableGoalRuntime::new(dir.path());
+        runtime
+            .create_run(
+                RunId::from("run-1"),
+                &goal,
+                &[task("task-a", &[])],
+                stamps(),
+            )
+            .unwrap();
+        append_review_audit_prerequisites(
+            &runtime,
+            &goal,
+            BTreeSet::from([GuardRequirement::Reviewer, GuardRequirement::Auditor]),
+        );
+        append_pass_review_and_enter_auditing(&runtime, &goal);
+        let before = fs::read(runtime.log_path()).unwrap();
+
+        let error = append_runtime_event(
+            &runtime,
+            &goal,
+            11,
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Auditing,
+                to: RunStatus::Completed,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            DurableGoalRuntimeError::Replay {
+                source: ReplayError::ReviewAuditResolutionRejected {
+                    sequence: 11,
+                    resolution: ReviewAuditResolution::AwaitingAudit {
+                        review_decision_id,
+                    },
+                }
+            } if review_decision_id == ReviewDecisionId::from("review-1")
+        ));
+        assert_eq!(fs::read(runtime.log_path()).unwrap(), before);
+        assert_eq!(
+            runtime
+                .load_run(&RunId::from("run-1"), &goal)
+                .unwrap()
+                .run_record
+                .status,
+            RunStatus::Auditing
+        );
+    }
+
+    #[test]
+    fn durable_review_audit_disagreement_preserves_owner_escalation_and_jsonl() {
+        let dir = TempDir::new().unwrap();
+        let goal = review_audit_goal();
+        let runtime = DurableGoalRuntime::new(dir.path());
+        runtime
+            .create_run(
+                RunId::from("run-1"),
+                &goal,
+                &[task("task-a", &[])],
+                stamps(),
+            )
+            .unwrap();
+        append_review_audit_prerequisites(
+            &runtime,
+            &goal,
+            BTreeSet::from([GuardRequirement::Reviewer, GuardRequirement::Auditor]),
+        );
+        append_pass_review_and_enter_auditing(&runtime, &goal);
+        append_runtime_event(
+            &runtime,
+            &goal,
+            11,
+            Role::Auditor,
+            RunEventPayload::AuditDecisionRecorded {
+                decision: audit_decision(ReviewVerdict::Fail),
+            },
+        )
+        .unwrap();
+        let before = fs::read(runtime.log_path()).unwrap();
+
+        let error = append_runtime_event(
+            &runtime,
+            &goal,
+            12,
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Auditing,
+                to: RunStatus::Completed,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            DurableGoalRuntimeError::Replay {
+                source: ReplayError::ReviewAuditResolutionRejected {
+                    sequence: 12,
+                    resolution: ReviewAuditResolution::OwnerEscalation {
+                        review_decision_id,
+                        audit_decision_id,
+                        reviewer_verdict: ReviewVerdict::Pass,
+                        auditor_verdict: ReviewVerdict::Fail,
+                    },
+                }
+            } if review_decision_id == ReviewDecisionId::from("review-1")
+                && audit_decision_id == AuditDecisionId::from("audit-1")
+        ));
+        assert_eq!(fs::read(runtime.log_path()).unwrap(), before);
+        assert_eq!(
+            runtime
+                .load_run(&RunId::from("run-1"), &goal)
+                .unwrap()
+                .run_record
+                .status,
+            RunStatus::Auditing
+        );
+    }
+
+    #[test]
+    fn durable_exact_required_pass_decisions_complete_and_reload_equally() {
+        let dir = TempDir::new().unwrap();
+        let goal = review_audit_goal();
+        let runtime = DurableGoalRuntime::new(dir.path());
+        runtime
+            .create_run(
+                RunId::from("run-1"),
+                &goal,
+                &[task("task-a", &[])],
+                stamps(),
+            )
+            .unwrap();
+        let requirements = BTreeSet::from([GuardRequirement::Reviewer, GuardRequirement::Auditor]);
+        append_review_audit_prerequisites(&runtime, &goal, requirements.clone());
+        append_pass_review_and_enter_auditing(&runtime, &goal);
+        append_runtime_event(
+            &runtime,
+            &goal,
+            11,
+            Role::Auditor,
+            RunEventPayload::AuditDecisionRecorded {
+                decision: audit_decision(ReviewVerdict::Pass),
+            },
+        )
+        .unwrap();
+
+        let completed = append_runtime_event(
+            &runtime,
+            &goal,
+            12,
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Auditing,
+                to: RunStatus::Completed,
+            },
+        )
+        .expect("exact required Pass decisions should permit completion");
+
+        assert_eq!(completed.run_record.status, RunStatus::Completed);
+        assert_eq!(
+            completed
+                .review_audit_requirements
+                .as_ref()
+                .map(|recorded| &recorded.guard_requirements),
+            Some(&requirements)
+        );
+        assert_eq!(completed.review_decisions, vec![review_decision()]);
+        assert_eq!(
+            completed.audit_decisions,
+            vec![audit_decision(ReviewVerdict::Pass)]
+        );
+        let reopened = DurableGoalRuntime::new(dir.path());
+        let reloaded = reopened.load_run(&RunId::from("run-1"), &goal).unwrap();
+        assert_eq!(reloaded, completed);
+        assert_eq!(reloaded.run_record.status, RunStatus::Completed);
     }
 
     #[test]

@@ -557,7 +557,7 @@ flowchart TD
     Exact -->|"No"| Mismatch["Reject; keep approval unconsumed"]
     Exact -->|"Yes"| Consume["Consume approval with CAS"]
     Consume --> Effect["Invoke closure at most once"]
-    Effect --> Downstream["Return Reviewer and Auditor requirements for P4"]
+    Effect --> Downstream["Return requirements; P4 records separate completion decisions"]
 ```
 
 **Authority boundary:** JSONL is authoritative for orchestration events, replay,
@@ -574,11 +574,14 @@ guarantee. A SQLite execution entity may show `running` while JSONL still shows
 states without declaring any stale.
 
 `ApprovalAuthority::ExplicitOwner` is a typed caller assertion, not
-authentication, tenancy, credential, session, or identity proof. Reviewer and
-Auditor requirements are returned for downstream P4 completion enforcement; P3
-does not claim those evidence decisions have occurred. Approval is consumed
-before the effect closure, and consumption is not atomic with an external side
-effect. Failure or panic after consumption can leave no external effect under the
+authentication, tenancy, credential, session, or identity proof. P3 returns
+Reviewer and Auditor requirements but does not claim that their decisions have
+occurred. P4 independently records evidence references, requirements, and
+role-bound decisions in the durable run log. It rejects `completed` when a
+required decision is missing, invalid, failed, or conflicts with the other role;
+only a resolved `Pass` may complete the run. Approval is consumed before the
+effect closure, and consumption is not atomic with an external side effect.
+Failure or panic after consumption can leave no external effect under the
 documented at-most-once/no-retry boundary.
 
 **Recovery:** `create_run` writes no SQLite state. If the process stops after the
@@ -691,7 +694,10 @@ and `healthy: false`.
   pauses all applicable R2 paths, denies R3 by default, and consumes an exact
   approved resume at most once across independent runtime instances. Execution
   and approval remain separate logical authorities through distinct entity
-  namespaces in one shared SQLite versioned-state database.
+  namespaces in one shared SQLite versioned-state database. P4 additionally
+  blocks durable completion until the policy-required Reviewer/Auditor decisions
+  replay, validate, and resolve as `Pass`; R0/no-review completion remains
+  compatible.
 - The public startup does not launch the LangGraph, runtime guard, or brain
   libraries as independent services.
 

@@ -29,8 +29,10 @@
 - R2 approval is consumed before the effect closure. Consumption and an external
   side effect are not one transaction; failure or panic after consumption is
   at-most-once/no-retry and can leave no external effect.
-- Reviewer and Auditor requirements are returned to downstream completion
-  enforcement. P3 does not implement their evidence decisions; that is P4 work.
+- P3 returns Reviewer and Auditor requirements but does not create their
+  decisions. P4 separately enforces structurally valid, replayable decisions
+  before completion; it does not assess external evidence bytes, authenticate a
+  reviewer or auditor, or validate live human/model judgment quality.
 - The APIs expose no combined execution-plus-approval transaction in shared
   SQLite. JSONL and SQLite are the two durable media and have no cross-medium
   transaction, outbox, projection, or reconciliation guarantee.

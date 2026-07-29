@@ -1,8 +1,11 @@
+use crate::review_audit::{evaluate_review_audit, ReviewAuditError, ReviewAuditEvaluationContext};
 use ovca_types::{
-    validate_run_transition, CompletionEvidence, ContractVersion, CoordinatorFinalResponse,
-    EventId, EvidenceId, ExecutionPlan, GoalContract, GoalId, ProjectId, Role, RunEvent,
-    RunEventPayload, RunId, RunRecord, RunStatus, RunTransitionError, SpecialistOutput, TaskId,
-    TaskStatus,
+    validate_run_transition, validate_run_transition_with_guard_requirements, AuditDecision,
+    AuditDecisionId, CompletionEvidence, ContractVersion, CoordinatorFinalResponse, EventId,
+    EvidenceId, EvidenceRef, ExecutionPlan, GoalContract, GoalId, ProjectId,
+    ReviewAuditRequirements, ReviewAuditResolution, ReviewDecision, ReviewDecisionId, Role,
+    RunEvent, RunEventPayload, RunId, RunRecord, RunStatus, RunTransitionError, SpecialistOutput,
+    TaskId, TaskStatus,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -100,6 +103,14 @@ pub enum ReplayError {
         sequence: u64,
         error: RunTransitionError,
     },
+    ReviewAuditEvaluationFailed {
+        sequence: u64,
+        error: ReviewAuditError,
+    },
+    ReviewAuditResolutionRejected {
+        sequence: u64,
+        resolution: ReviewAuditResolution,
+    },
     UnknownTask {
         sequence: u64,
         task_id: TaskId,
@@ -132,6 +143,44 @@ pub enum ReplayError {
     },
     DuplicateCoordinatorFinalResponse {
         sequence: u64,
+    },
+    DuplicateEvidenceReference {
+        sequence: u64,
+        evidence_id: EvidenceId,
+    },
+    DuplicateReviewAuditRequirements {
+        sequence: u64,
+    },
+    DecisionRunIdMismatch {
+        sequence: u64,
+        contract: &'static str,
+        expected: RunId,
+        found: RunId,
+    },
+    DecisionGoalIdMismatch {
+        sequence: u64,
+        contract: &'static str,
+        expected: GoalId,
+        found: GoalId,
+    },
+    DecisionProducerRoleMismatch {
+        sequence: u64,
+        contract: &'static str,
+        expected: Role,
+        event_role: Role,
+        decision_role: Role,
+    },
+    DuplicateReviewDecision {
+        sequence: u64,
+        decision_id: ReviewDecisionId,
+    },
+    DuplicateAuditDecision {
+        sequence: u64,
+        decision_id: AuditDecisionId,
+    },
+    AuditReviewDecisionNotRecorded {
+        sequence: u64,
+        review_decision_id: ReviewDecisionId,
     },
 }
 
@@ -255,6 +304,17 @@ impl fmt::Display for ReplayError {
             Self::RunTransitionRejected { sequence, error } => {
                 write!(f, "run status transition at sequence {sequence} was rejected: {error}")
             }
+            Self::ReviewAuditEvaluationFailed { sequence, error } => write!(
+                f,
+                "completion review/audit evaluation at sequence {sequence} failed: {error}"
+            ),
+            Self::ReviewAuditResolutionRejected {
+                sequence,
+                resolution,
+            } => write!(
+                f,
+                "completion review/audit resolution at sequence {sequence} was rejected: {resolution:?}"
+            ),
             Self::UnknownTask { sequence, task_id } => write!(
                 f,
                 "run event at sequence {sequence} references undeclared task {task_id}"
@@ -302,6 +362,66 @@ impl fmt::Display for ReplayError {
                 f,
                 "Coordinator final response appears more than once; duplicate is at sequence {sequence}"
             ),
+            Self::DuplicateEvidenceReference {
+                sequence,
+                evidence_id,
+            } => write!(
+                f,
+                "evidence reference {evidence_id} is duplicated at sequence {sequence}"
+            ),
+            Self::DuplicateReviewAuditRequirements { sequence } => write!(
+                f,
+                "review/audit requirements appear more than once; duplicate is at sequence {sequence}"
+            ),
+            Self::DecisionRunIdMismatch {
+                sequence,
+                contract,
+                expected,
+                found,
+            } => write!(
+                f,
+                "{contract} at sequence {sequence} has run ID {found}, expected {expected}"
+            ),
+            Self::DecisionGoalIdMismatch {
+                sequence,
+                contract,
+                expected,
+                found,
+            } => write!(
+                f,
+                "{contract} at sequence {sequence} has goal ID {found}, expected {expected}"
+            ),
+            Self::DecisionProducerRoleMismatch {
+                sequence,
+                contract,
+                expected,
+                event_role,
+                decision_role,
+            } => write!(
+                f,
+                "{contract} at sequence {sequence} requires event and decision role {expected}, found event role {event_role} and decision role {decision_role}"
+            ),
+            Self::DuplicateReviewDecision {
+                sequence,
+                decision_id,
+            } => write!(
+                f,
+                "review decision {decision_id} is duplicated at sequence {sequence}"
+            ),
+            Self::DuplicateAuditDecision {
+                sequence,
+                decision_id,
+            } => write!(
+                f,
+                "audit decision {decision_id} is duplicated at sequence {sequence}"
+            ),
+            Self::AuditReviewDecisionNotRecorded {
+                sequence,
+                review_decision_id,
+            } => write!(
+                f,
+                "audit decision at sequence {sequence} references review decision {review_decision_id} before it was recorded"
+            ),
         }
     }
 }
@@ -314,6 +434,10 @@ pub struct ReplayedRun {
     pub run_record: RunRecord,
     pub execution_plan: Option<ExecutionPlan>,
     pub task_statuses: BTreeMap<TaskId, TaskStatus>,
+    pub evidence_references: Vec<EvidenceRef>,
+    pub review_audit_requirements: Option<ReviewAuditRequirements>,
+    pub review_decisions: Vec<ReviewDecision>,
+    pub audit_decisions: Vec<AuditDecision>,
     pub completion_evidence: Option<CompletionEvidence>,
     pub specialist_outputs: Vec<SpecialistOutput>,
     pub coordinator_final_response: Option<CoordinatorFinalResponse>,
@@ -397,6 +521,12 @@ pub fn replay_run(
         .collect::<BTreeMap<_, _>>();
     let mut evidence_ids = BTreeSet::new();
     let mut execution_plan = None;
+    let mut evidence_references = Vec::new();
+    let mut review_audit_requirements = None;
+    let mut review_decision_ids = BTreeSet::new();
+    let mut review_decisions = Vec::new();
+    let mut audit_decision_ids = BTreeSet::new();
+    let mut audit_decisions = Vec::new();
     let mut completion_evidence = None;
     let mut specialist_outputs = Vec::new();
     let mut coordinator_final_response = None;
@@ -426,13 +556,31 @@ pub fn replay_run(
                         found: *from,
                     });
                 }
-                validate_run_transition(*from, *to, goal, completion_evidence.as_ref()).map_err(
-                    |error| ReplayError::RunTransitionRejected {
-                        sequence: event.sequence,
-                        error,
-                    },
-                )?;
+                let empty_guard_requirements = BTreeSet::new();
+                let guard_requirements = review_audit_requirements.as_ref().map_or(
+                    &empty_guard_requirements,
+                    |requirements: &ReviewAuditRequirements| &requirements.guard_requirements,
+                );
+                let transition_result = if *to == RunStatus::Completed {
+                    validate_run_transition_with_guard_requirements(
+                        *from,
+                        *to,
+                        goal,
+                        completion_evidence.as_ref(),
+                        guard_requirements,
+                    )
+                } else {
+                    validate_run_transition(*from, *to, goal, completion_evidence.as_ref())
+                };
+                transition_result.map_err(|error| ReplayError::RunTransitionRejected {
+                    sequence: event.sequence,
+                    error,
+                })?;
                 if *to == RunStatus::Completed {
+                    let goal = goal.ok_or(ReplayError::RunTransitionRejected {
+                        sequence: event.sequence,
+                        error: RunTransitionError::CompletionContractMissing,
+                    })?;
                     let evidence =
                         completion_evidence
                             .as_ref()
@@ -447,6 +595,29 @@ pub fn replay_run(
                                 evidence_id: evidence_id.clone(),
                             });
                         }
+                    }
+                    let resolution = evaluate_review_audit(
+                        &ReviewAuditEvaluationContext {
+                            expected_run_id: &run_record.id,
+                            goal_contract: goal,
+                            completion_evidence: evidence,
+                            evidence_catalog: &evidence_references,
+                            guard_requirements,
+                        },
+                        review_decisions.first(),
+                        audit_decisions.first(),
+                    )
+                    .map_err(|error| {
+                        ReplayError::ReviewAuditEvaluationFailed {
+                            sequence: event.sequence,
+                            error,
+                        }
+                    })?;
+                    if !matches!(&resolution, ReviewAuditResolution::Pass { .. }) {
+                        return Err(ReplayError::ReviewAuditResolutionRejected {
+                            sequence: event.sequence,
+                            resolution,
+                        });
                     }
                 }
                 run_record.status = *to;
@@ -479,6 +650,118 @@ pub fn replay_run(
                 if evidence_ids.insert(evidence_id.clone()) {
                     run_record.evidence_refs.push(evidence_id.clone());
                 }
+            }
+            RunEventPayload::EvidenceReferenceRecorded { evidence } => {
+                validate_nested_contract_version(
+                    event.sequence,
+                    "evidence_reference",
+                    evidence.contract_version,
+                )?;
+                if let Some(integrity) = &evidence.integrity {
+                    validate_nested_contract_version(
+                        event.sequence,
+                        "evidence_integrity",
+                        integrity.contract_version,
+                    )?;
+                }
+                if !evidence_ids.insert(evidence.id.clone()) {
+                    return Err(ReplayError::DuplicateEvidenceReference {
+                        sequence: event.sequence,
+                        evidence_id: evidence.id.clone(),
+                    });
+                }
+                run_record.evidence_refs.push(evidence.id.clone());
+                evidence_references.push(evidence.clone());
+            }
+            RunEventPayload::ReviewAuditRequirementsRecorded { requirements } => {
+                validate_nested_contract_version(
+                    event.sequence,
+                    "review_audit_requirements",
+                    requirements.contract_version,
+                )?;
+                if review_audit_requirements.is_some() {
+                    return Err(ReplayError::DuplicateReviewAuditRequirements {
+                        sequence: event.sequence,
+                    });
+                }
+                review_audit_requirements = Some(requirements.clone());
+            }
+            RunEventPayload::ReviewDecisionRecorded { decision } => {
+                validate_nested_contract_version(
+                    event.sequence,
+                    "review_decision",
+                    decision.contract_version,
+                )?;
+                for assessment in &decision.assessments {
+                    validate_nested_contract_version(
+                        event.sequence,
+                        "review_criterion_assessment",
+                        assessment.contract_version,
+                    )?;
+                }
+                validate_decision_binding(
+                    event.sequence,
+                    "review_decision",
+                    &run_record,
+                    &decision.run_id,
+                    &decision.goal_id,
+                )?;
+                validate_decision_role(
+                    event.sequence,
+                    "review_decision",
+                    Role::Reviewer,
+                    event.producer_role,
+                    decision.producer_role,
+                )?;
+                if !review_decisions.is_empty() || !review_decision_ids.insert(decision.id.clone())
+                {
+                    return Err(ReplayError::DuplicateReviewDecision {
+                        sequence: event.sequence,
+                        decision_id: decision.id.clone(),
+                    });
+                }
+                review_decisions.push(decision.clone());
+            }
+            RunEventPayload::AuditDecisionRecorded { decision } => {
+                validate_nested_contract_version(
+                    event.sequence,
+                    "audit_decision",
+                    decision.contract_version,
+                )?;
+                for assessment in &decision.assessments {
+                    validate_nested_contract_version(
+                        event.sequence,
+                        "audit_criterion_assessment",
+                        assessment.contract_version,
+                    )?;
+                }
+                validate_decision_binding(
+                    event.sequence,
+                    "audit_decision",
+                    &run_record,
+                    &decision.run_id,
+                    &decision.goal_id,
+                )?;
+                validate_decision_role(
+                    event.sequence,
+                    "audit_decision",
+                    Role::Auditor,
+                    event.producer_role,
+                    decision.producer_role,
+                )?;
+                if !audit_decisions.is_empty() || !audit_decision_ids.insert(decision.id.clone()) {
+                    return Err(ReplayError::DuplicateAuditDecision {
+                        sequence: event.sequence,
+                        decision_id: decision.id.clone(),
+                    });
+                }
+                if !review_decision_ids.contains(&decision.review_decision_id) {
+                    return Err(ReplayError::AuditReviewDecisionNotRecorded {
+                        sequence: event.sequence,
+                        review_decision_id: decision.review_decision_id.clone(),
+                    });
+                }
+                audit_decisions.push(decision.clone());
             }
             RunEventPayload::CompletionEvidenceRecorded { evidence } => {
                 validate_nested_contract_version(
@@ -556,10 +839,59 @@ pub fn replay_run(
         run_record,
         execution_plan,
         task_statuses,
+        evidence_references,
+        review_audit_requirements,
+        review_decisions,
+        audit_decisions,
         completion_evidence,
         specialist_outputs,
         coordinator_final_response,
     })
+}
+
+fn validate_decision_binding(
+    sequence: u64,
+    contract: &'static str,
+    run_record: &RunRecord,
+    run_id: &RunId,
+    goal_id: &GoalId,
+) -> Result<(), ReplayError> {
+    if *run_id != run_record.id {
+        return Err(ReplayError::DecisionRunIdMismatch {
+            sequence,
+            contract,
+            expected: run_record.id.clone(),
+            found: run_id.clone(),
+        });
+    }
+    if *goal_id != run_record.goal_id {
+        return Err(ReplayError::DecisionGoalIdMismatch {
+            sequence,
+            contract,
+            expected: run_record.goal_id.clone(),
+            found: goal_id.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_decision_role(
+    sequence: u64,
+    contract: &'static str,
+    expected: Role,
+    event_role: Role,
+    decision_role: Role,
+) -> Result<(), ReplayError> {
+    if event_role != expected || decision_role != expected {
+        return Err(ReplayError::DecisionProducerRoleMismatch {
+            sequence,
+            contract,
+            expected,
+            event_role,
+            decision_role,
+        });
+    }
+    Ok(())
 }
 
 fn validate_nested_contract_version(
@@ -707,10 +1039,11 @@ mod tests {
     use chrono::{DateTime, Duration, Utc};
     use ovca_storage::RunEventLog;
     use ovca_types::{
-        CompletionPrecondition, EvidenceId, ExecutionMode, ExecutionWave, PermissionProfile,
-        RiskTier,
+        CompletionPrecondition, CriterionAssessment, CriterionAssessmentVerdict, CriterionKind,
+        EvidenceId, EvidenceKind, ExecutionMode, ExecutionWave, GuardRequirement,
+        PermissionProfile, ReviewVerdict, RiskTier,
     };
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use tempfile::TempDir;
 
     fn occurred_at() -> DateTime<Utc> {
@@ -913,6 +1246,106 @@ mod tests {
             response: response.to_owned(),
             evidence_refs: vec![EvidenceId::from("evidence-1")],
         }
+    }
+
+    fn evidence_reference(id: &str) -> EvidenceRef {
+        EvidenceRef {
+            contract_version: ContractVersion::current(),
+            id: EvidenceId::from(id),
+            kind: EvidenceKind::TestResult,
+            reference: format!("memory://evidence/{id}"),
+            producer_role: Role::Engineer,
+            integrity: None,
+            produced_at: occurred_at(),
+        }
+    }
+
+    fn passing_assessments() -> Vec<CriterionAssessment> {
+        [
+            (CriterionKind::Acceptance, "accepted"),
+            (CriterionKind::Verification, "verified"),
+            (CriterionKind::DefinitionOfDone, "done"),
+        ]
+        .into_iter()
+        .map(|(kind, criterion)| CriterionAssessment {
+            contract_version: ContractVersion::current(),
+            kind,
+            criterion: criterion.to_owned(),
+            verdict: CriterionAssessmentVerdict::Satisfied,
+            evidence_refs: vec![EvidenceId::from("evidence-1")],
+            rationale: "evidence supports the exact criterion".to_owned(),
+        })
+        .collect()
+    }
+
+    fn review_decision() -> ReviewDecision {
+        ReviewDecision {
+            contract_version: ContractVersion::current(),
+            id: ReviewDecisionId::from("review-1"),
+            run_id: RunId::from("run-1"),
+            goal_id: GoalId::from("goal-1"),
+            producer_role: Role::Reviewer,
+            verdict: ReviewVerdict::Pass,
+            assessments: passing_assessments(),
+            summary: "review passed".to_owned(),
+            decided_at: occurred_at(),
+        }
+    }
+
+    fn audit_decision() -> AuditDecision {
+        audit_decision_with_verdict(ReviewVerdict::Pass)
+    }
+
+    fn audit_decision_with_verdict(verdict: ReviewVerdict) -> AuditDecision {
+        let mut assessments = passing_assessments();
+        if verdict == ReviewVerdict::Fail {
+            assessments[0].verdict = CriterionAssessmentVerdict::Unsatisfied;
+            assessments[0].rationale = "the independent countercheck failed".to_owned();
+        }
+        AuditDecision {
+            contract_version: ContractVersion::current(),
+            id: AuditDecisionId::from("audit-1"),
+            run_id: RunId::from("run-1"),
+            goal_id: GoalId::from("goal-1"),
+            review_decision_id: ReviewDecisionId::from("review-1"),
+            producer_role: Role::Auditor,
+            verdict,
+            assessments,
+            summary: "audit completed".to_owned(),
+            decided_at: occurred_at() + Duration::seconds(1),
+        }
+    }
+
+    fn completion_prerequisites(guard_requirements: BTreeSet<GuardRequirement>) -> Vec<RunEvent> {
+        let mut events = state_chain(RunStatus::Running, &[]);
+        append_event(
+            &mut events,
+            "evidence-event",
+            Role::Engineer,
+            RunEventPayload::EvidenceReferenceRecorded {
+                evidence: evidence_reference("evidence-1"),
+            },
+        );
+        append_event(
+            &mut events,
+            "completion-evidence-event",
+            Role::Reviewer,
+            RunEventPayload::CompletionEvidenceRecorded {
+                evidence: completion_evidence(),
+            },
+        );
+        append_event(
+            &mut events,
+            "requirements-event",
+            Role::Coordinator,
+            RunEventPayload::ReviewAuditRequirementsRecorded {
+                requirements: ReviewAuditRequirements {
+                    contract_version: ContractVersion::current(),
+                    guard_requirements,
+                },
+            },
+        );
+        events
     }
 
     #[test]
@@ -1727,6 +2160,514 @@ mod tests {
             Err(ReplayError::GoalContractProjectIdMismatch {
                 expected: ProjectId::from("project-1"),
                 found: ProjectId::from("project-2"),
+            })
+        );
+    }
+
+    #[test]
+    fn replay_run_reconstructs_review_and_audit_events() {
+        let mut events = state_chain(RunStatus::Draft, &[]);
+        let evidence = evidence_reference("evidence-1");
+        let requirements = ReviewAuditRequirements {
+            contract_version: ContractVersion::current(),
+            guard_requirements: BTreeSet::from([
+                GuardRequirement::Reviewer,
+                GuardRequirement::Auditor,
+            ]),
+        };
+        let review = review_decision();
+        let audit = audit_decision();
+
+        append_event(
+            &mut events,
+            "review-event-1",
+            Role::Engineer,
+            RunEventPayload::EvidenceReferenceRecorded {
+                evidence: evidence.clone(),
+            },
+        );
+        append_event(
+            &mut events,
+            "review-event-2",
+            Role::Coordinator,
+            RunEventPayload::ReviewAuditRequirementsRecorded {
+                requirements: requirements.clone(),
+            },
+        );
+        append_event(
+            &mut events,
+            "review-event-3",
+            Role::Reviewer,
+            RunEventPayload::ReviewDecisionRecorded {
+                decision: review.clone(),
+            },
+        );
+        append_event(
+            &mut events,
+            "review-event-4",
+            Role::Auditor,
+            RunEventPayload::AuditDecisionRecorded {
+                decision: audit.clone(),
+            },
+        );
+
+        let replayed = replay_run(&events, Some(&goal_contract("goal-1")))
+            .expect("ordered review and audit events should replay");
+
+        assert_eq!(
+            replayed.run_record.evidence_refs,
+            vec![EvidenceId::from("evidence-1")]
+        );
+        assert_eq!(replayed.evidence_references, vec![evidence]);
+        assert_eq!(replayed.review_audit_requirements, Some(requirements));
+        assert_eq!(replayed.review_decisions, vec![review]);
+        assert_eq!(replayed.audit_decisions, vec![audit]);
+    }
+
+    #[test]
+    fn replay_run_rejects_invalid_review_audit_event_bindings_and_order() {
+        let mut wrong_role = state_chain(RunStatus::Draft, &[]);
+        append_event(
+            &mut wrong_role,
+            "review-event-1",
+            Role::Engineer,
+            RunEventPayload::ReviewDecisionRecorded {
+                decision: review_decision(),
+            },
+        );
+        assert!(matches!(
+            replay_run(&wrong_role, Some(&goal_contract("goal-1"))),
+            Err(ReplayError::DecisionProducerRoleMismatch {
+                contract: "review_decision",
+                ..
+            })
+        ));
+
+        let mut wrong_run = state_chain(RunStatus::Draft, &[]);
+        let mut mismatched_review = review_decision();
+        mismatched_review.run_id = RunId::from("run-other");
+        append_event(
+            &mut wrong_run,
+            "review-event-1",
+            Role::Reviewer,
+            RunEventPayload::ReviewDecisionRecorded {
+                decision: mismatched_review,
+            },
+        );
+        assert!(matches!(
+            replay_run(&wrong_run, Some(&goal_contract("goal-1"))),
+            Err(ReplayError::DecisionRunIdMismatch {
+                contract: "review_decision",
+                ..
+            })
+        ));
+
+        let mut duplicate_requirements = state_chain(RunStatus::Draft, &[]);
+        let requirements = ReviewAuditRequirements {
+            contract_version: ContractVersion::current(),
+            guard_requirements: BTreeSet::new(),
+        };
+        append_event(
+            &mut duplicate_requirements,
+            "review-event-1",
+            Role::Coordinator,
+            RunEventPayload::ReviewAuditRequirementsRecorded {
+                requirements: requirements.clone(),
+            },
+        );
+        append_event(
+            &mut duplicate_requirements,
+            "review-event-2",
+            Role::Coordinator,
+            RunEventPayload::ReviewAuditRequirementsRecorded { requirements },
+        );
+        assert_eq!(
+            replay_run(&duplicate_requirements, Some(&goal_contract("goal-1"))),
+            Err(ReplayError::DuplicateReviewAuditRequirements { sequence: 2 })
+        );
+
+        let mut audit_before_review = state_chain(RunStatus::Draft, &[]);
+        append_event(
+            &mut audit_before_review,
+            "review-event-1",
+            Role::Auditor,
+            RunEventPayload::AuditDecisionRecorded {
+                decision: audit_decision(),
+            },
+        );
+        assert_eq!(
+            replay_run(&audit_before_review, Some(&goal_contract("goal-1"))),
+            Err(ReplayError::AuditReviewDecisionNotRecorded {
+                sequence: 1,
+                review_decision_id: ReviewDecisionId::from("review-1"),
+            })
+        );
+    }
+
+    #[test]
+    fn replay_run_rejects_second_distinct_review_or_audit_decision() {
+        let goal = goal_contract("goal-1");
+        let mut duplicate_review = state_chain(RunStatus::Draft, &[]);
+        append_event(
+            &mut duplicate_review,
+            "review-event-1",
+            Role::Reviewer,
+            RunEventPayload::ReviewDecisionRecorded {
+                decision: review_decision(),
+            },
+        );
+        let mut second_review = review_decision();
+        second_review.id = ReviewDecisionId::from("review-2");
+        append_event(
+            &mut duplicate_review,
+            "review-event-2",
+            Role::Reviewer,
+            RunEventPayload::ReviewDecisionRecorded {
+                decision: second_review,
+            },
+        );
+        assert_eq!(
+            replay_run(&duplicate_review, Some(&goal)),
+            Err(ReplayError::DuplicateReviewDecision {
+                sequence: 2,
+                decision_id: ReviewDecisionId::from("review-2"),
+            })
+        );
+
+        let mut duplicate_audit = state_chain(RunStatus::Draft, &[]);
+        append_event(
+            &mut duplicate_audit,
+            "review-event-1",
+            Role::Reviewer,
+            RunEventPayload::ReviewDecisionRecorded {
+                decision: review_decision(),
+            },
+        );
+        append_event(
+            &mut duplicate_audit,
+            "audit-event-1",
+            Role::Auditor,
+            RunEventPayload::AuditDecisionRecorded {
+                decision: audit_decision(),
+            },
+        );
+        let mut second_audit = audit_decision();
+        second_audit.id = AuditDecisionId::from("audit-2");
+        append_event(
+            &mut duplicate_audit,
+            "audit-event-2",
+            Role::Auditor,
+            RunEventPayload::AuditDecisionRecorded {
+                decision: second_audit,
+            },
+        );
+        assert_eq!(
+            replay_run(&duplicate_audit, Some(&goal)),
+            Err(ReplayError::DuplicateAuditDecision {
+                sequence: 3,
+                decision_id: AuditDecisionId::from("audit-2"),
+            })
+        );
+    }
+
+    #[test]
+    fn replay_run_rejects_completion_missing_required_review() {
+        let goal = goal_contract("goal-1");
+        let mut events = completion_prerequisites(BTreeSet::from([GuardRequirement::Reviewer]));
+        append_event(
+            &mut events,
+            "reviewing-event",
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Running,
+                to: RunStatus::Reviewing,
+            },
+        );
+        append_event(
+            &mut events,
+            "completed-event",
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Reviewing,
+                to: RunStatus::Completed,
+            },
+        );
+
+        assert_eq!(
+            replay_run(&events, Some(&goal)),
+            Err(ReplayError::ReviewAuditResolutionRejected {
+                sequence: 8,
+                resolution: ReviewAuditResolution::AwaitingReview,
+            })
+        );
+    }
+
+    #[test]
+    fn replay_run_rejects_completion_missing_required_audit() {
+        let goal = goal_contract("goal-1");
+        let mut events = completion_prerequisites(BTreeSet::from([
+            GuardRequirement::Reviewer,
+            GuardRequirement::Auditor,
+        ]));
+        append_event(
+            &mut events,
+            "reviewing-event",
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Running,
+                to: RunStatus::Reviewing,
+            },
+        );
+        append_event(
+            &mut events,
+            "review-event",
+            Role::Reviewer,
+            RunEventPayload::ReviewDecisionRecorded {
+                decision: review_decision(),
+            },
+        );
+        append_event(
+            &mut events,
+            "auditing-event",
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Reviewing,
+                to: RunStatus::Auditing,
+            },
+        );
+        append_event(
+            &mut events,
+            "completed-event",
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Auditing,
+                to: RunStatus::Completed,
+            },
+        );
+
+        assert_eq!(
+            replay_run(&events, Some(&goal)),
+            Err(ReplayError::ReviewAuditResolutionRejected {
+                sequence: 10,
+                resolution: ReviewAuditResolution::AwaitingAudit {
+                    review_decision_id: ReviewDecisionId::from("review-1"),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn replay_run_rejects_review_audit_disagreement_with_owner_escalation() {
+        let goal = goal_contract("goal-1");
+        let mut events = completion_prerequisites(BTreeSet::from([
+            GuardRequirement::Reviewer,
+            GuardRequirement::Auditor,
+        ]));
+        append_event(
+            &mut events,
+            "reviewing-event",
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Running,
+                to: RunStatus::Reviewing,
+            },
+        );
+        append_event(
+            &mut events,
+            "review-event",
+            Role::Reviewer,
+            RunEventPayload::ReviewDecisionRecorded {
+                decision: review_decision(),
+            },
+        );
+        append_event(
+            &mut events,
+            "auditing-event",
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Reviewing,
+                to: RunStatus::Auditing,
+            },
+        );
+        append_event(
+            &mut events,
+            "audit-event",
+            Role::Auditor,
+            RunEventPayload::AuditDecisionRecorded {
+                decision: audit_decision_with_verdict(ReviewVerdict::Fail),
+            },
+        );
+        append_event(
+            &mut events,
+            "completed-event",
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Auditing,
+                to: RunStatus::Completed,
+            },
+        );
+
+        assert_eq!(
+            replay_run(&events, Some(&goal)),
+            Err(ReplayError::ReviewAuditResolutionRejected {
+                sequence: 11,
+                resolution: ReviewAuditResolution::OwnerEscalation {
+                    review_decision_id: ReviewDecisionId::from("review-1"),
+                    audit_decision_id: AuditDecisionId::from("audit-1"),
+                    reviewer_verdict: ReviewVerdict::Pass,
+                    auditor_verdict: ReviewVerdict::Fail,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn replay_run_completes_with_exact_required_pass_decisions() {
+        let goal = goal_contract("goal-1");
+        let guard_requirements =
+            BTreeSet::from([GuardRequirement::Reviewer, GuardRequirement::Auditor]);
+        let mut events = completion_prerequisites(guard_requirements.clone());
+        let review = review_decision();
+        let audit = audit_decision();
+        append_event(
+            &mut events,
+            "reviewing-event",
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Running,
+                to: RunStatus::Reviewing,
+            },
+        );
+        append_event(
+            &mut events,
+            "review-event",
+            Role::Reviewer,
+            RunEventPayload::ReviewDecisionRecorded {
+                decision: review.clone(),
+            },
+        );
+        append_event(
+            &mut events,
+            "auditing-event",
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Reviewing,
+                to: RunStatus::Auditing,
+            },
+        );
+        append_event(
+            &mut events,
+            "audit-event",
+            Role::Auditor,
+            RunEventPayload::AuditDecisionRecorded {
+                decision: audit.clone(),
+            },
+        );
+        append_event(
+            &mut events,
+            "completed-event",
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Auditing,
+                to: RunStatus::Completed,
+            },
+        );
+
+        let replayed = replay_run(&events, Some(&goal))
+            .expect("exact required Pass decisions should permit completion");
+
+        assert_eq!(replayed.run_record.status, RunStatus::Completed);
+        assert_eq!(
+            replayed.review_audit_requirements,
+            Some(ReviewAuditRequirements {
+                contract_version: ContractVersion::current(),
+                guard_requirements,
+            })
+        );
+        assert_eq!(replayed.review_decisions, vec![review]);
+        assert_eq!(replayed.audit_decisions, vec![audit]);
+    }
+
+    #[test]
+    fn replay_run_r0_no_requirements_event_completes_without_decisions() {
+        let goal = goal_contract("goal-1");
+        let mut events = state_chain(RunStatus::Running, &[]);
+        append_event(
+            &mut events,
+            "evidence-event",
+            Role::Engineer,
+            RunEventPayload::EvidenceReferenceRecorded {
+                evidence: evidence_reference("evidence-1"),
+            },
+        );
+        append_event(
+            &mut events,
+            "completion-evidence-event",
+            Role::Reviewer,
+            RunEventPayload::CompletionEvidenceRecorded {
+                evidence: completion_evidence(),
+            },
+        );
+        append_event(
+            &mut events,
+            "completed-event",
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Running,
+                to: RunStatus::Completed,
+            },
+        );
+
+        let replayed = replay_run(&events, Some(&goal))
+            .expect("R0 completion should remain compatible without review decisions");
+
+        assert_eq!(replayed.run_record.status, RunStatus::Completed);
+        assert_eq!(replayed.review_audit_requirements, None);
+        assert!(replayed.review_decisions.is_empty());
+        assert!(replayed.audit_decisions.is_empty());
+    }
+
+    #[test]
+    fn replay_run_maps_malformed_review_to_structured_completion_error() {
+        let goal = goal_contract("goal-1");
+        let mut events = completion_prerequisites(BTreeSet::from([GuardRequirement::Reviewer]));
+        let mut malformed_review = review_decision();
+        malformed_review.assessments.truncate(1);
+        append_event(
+            &mut events,
+            "review-event",
+            Role::Reviewer,
+            RunEventPayload::ReviewDecisionRecorded {
+                decision: malformed_review,
+            },
+        );
+        append_event(
+            &mut events,
+            "reviewing-event",
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Running,
+                to: RunStatus::Reviewing,
+            },
+        );
+        append_event(
+            &mut events,
+            "completed-event",
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Reviewing,
+                to: RunStatus::Completed,
+            },
+        );
+
+        assert_eq!(
+            replay_run(&events, Some(&goal)),
+            Err(ReplayError::ReviewAuditEvaluationFailed {
+                sequence: 9,
+                error: ReviewAuditError::MissingCriterionAssessment {
+                    kind: CriterionKind::Verification,
+                    criterion: "verified".to_owned(),
+                },
             })
         );
     }

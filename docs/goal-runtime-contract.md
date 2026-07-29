@@ -6,14 +6,15 @@ The goal runtime contract is `contract_available` in `ovca-types`. Versioned
 Rust and JSON models plus a pure run-state transition validator are available to
 embedding callers.
 
-P1 through P3 consume those contracts through a `runtime_wired`, library-only
+P1 through P4 consume those contracts through a `runtime_wired`, library-only
 path. It can schedule tasks, append strict run events under an external root,
 validate an event chain, deterministically replay a `RunRecord`, maintain an
 independent SQLite execution lifecycle, and guard effect closures through a
-durable approval ledger. This is not a service: startup does not launch it and
-no HTTP endpoint exposes it. It does not invoke workers, authenticate owner
-identity, perform Reviewer or Auditor evidence decisions, call providers, or
-wire external side effects.
+durable approval ledger. P4 additionally records and replays role-bound
+review/audit decisions before accepting completion. This is not a service:
+startup does not launch it and no HTTP endpoint exposes it. It does not invoke
+workers, authenticate owner identity, generate live Reviewer or Auditor
+judgment, call providers, or wire external side effects.
 
 ## Contract version
 
@@ -94,9 +95,9 @@ resume an existing approval.
 `ApprovalAuthority::ExplicitOwner` is a typed assertion supplied by the caller.
 It is not authentication, tenancy, credential, session, or identity proof. P3
 consumes an approved record with compare-and-swap before calling the effect
-closure. Reviewer and Auditor requirements are returned to the caller for
-downstream completion enforcement and P4; P3 does not claim those reviews have
-occurred.
+closure. It returns Reviewer and Auditor requirements but does not claim their
+decisions have occurred. P4 separately records and replays those decisions before
+it accepts a completed run.
 
 Approval consumption and an external side effect are not one transaction. If the
 effect fails or panics after consumption, the request remains consumed and the
@@ -148,7 +149,7 @@ Failures use the serde-serializable `RunTransitionError` tagged by a stable `cod
 with fields such as `from`, `to`, `required`, `actual`, and `missing` where
 applicable.
 
-## Completion validation in P1
+## Completion validation and P4 resolution
 
 P1 can call:
 
@@ -168,10 +169,28 @@ the actual evidence IDs and deterministic lists of satisfied acceptance,
 verification, and definition-of-done items. A configured minimum of zero is
 treated as one, so `completed` can never be evidence-free.
 
-`replay_run` applies this validator before accepting a transition to `completed`.
-Every evidence ID used by `CompletionEvidence` must already have appeared in an
-`EvidenceAttached` event. Invalid prospective events are rejected before
-`DurableGoalRuntime::append_event` writes them.
+`replay_run` applies this base validator before accepting a transition to
+`completed`. Every evidence ID used by `CompletionEvidence` must already have
+appeared in an `EvidenceAttached` event. Invalid prospective events are rejected
+before `DurableGoalRuntime::append_event` writes them.
+
+P4 adds a durable completion resolution on top of that base transition rule.
+`EvidenceReferenceRecorded`, `ReviewAuditRequirementsRecorded`,
+`ReviewDecisionRecorded`, and `AuditDecisionRecorded` are role-bound run events.
+The replayed requirements select whether Reviewer and Auditor decisions are
+required; the evaluator also re-derives the requirement from the goal permission
+profile, so a weaker recorded requirement cannot bypass policy. On an attempted
+transition to `completed`, replay validates the evidence catalog, completion
+evidence, decision identities, roles, criterion coverage, and verdicts. Only
+`ReviewAuditResolution::Pass` permits the transition. Missing required review or
+audit returns an awaiting resolution, and a Reviewer/Auditor disagreement returns
+an owner-escalation resolution; both reject completion before persistence.
+
+The replay contract accepts at most one Reviewer decision and at most one Auditor
+decision for a run because it has no durable selector for competing decisions.
+Duplicate or distinct second decisions are rejected rather than silently choosing
+one. With no selected review or audit requirement, the R0/no-review path keeps
+the original `running -> completed` behavior.
 
 ## Durable replay
 
@@ -189,8 +208,10 @@ reports malformed non-empty rows rather than skipping them.
 `DurableGoalRuntime` builds four caller-stamped Coordinator events through
 `planned`, validates a prospective append by replaying it in memory, persists it,
 then reloads and replays the durable bytes. `ReplayedRun` contains `RunRecord`,
-the execution plan, task statuses, completion evidence, ordered specialist
-outputs, and the optional Coordinator final response.
+the execution plan, task statuses, completion evidence, the evidence-reference
+catalog, optional review/audit requirements, ordered Reviewer and Auditor
+decisions, ordered specialist outputs, and the optional Coordinator final
+response. A reload applies the same P4 completion gate as prospective append.
 
 JSONL assumes one writer per run. SQLite is the separate P2 authority for claim,
 lease, compare-and-swap revision, heartbeat, retry, cancellation, idempotency,
@@ -229,7 +250,9 @@ no lifecycle event projection or outbox.
 trips, deterministic event serialization, valid and invalid transitions,
 completion gates, and required evidence. `ovca-runtime-core` tests cover golden
 scheduling, final-answer ownership, event-chain integrity, replay, and durable
-reopen equivalence. `ovca-langgraph` tests cover deterministic bootstrap,
+reopen equivalence, including missing review/audit, conflict escalation,
+duplicate-decision rejection, valid `Pass`, and R0 compatibility. `ovca-langgraph`
+tests cover deterministic bootstrap,
 contract-version rejection, validate-before-append behavior, strict reload,
 two-store recovery and idempotency, R0 execution without approval state, all 12
 R2 pause paths, all 12 R3 deny paths, durable reopen, request and permission

@@ -9,12 +9,15 @@
 | Startup and HTTP | not wired | `scripts/ovca.ps1` does not launch or expose this kernel |
 | Worker lifecycle | `runtime_wired`, `library-only` | P2 SQLite authority owns claim, lease, heartbeat, retry, cancellation, idempotency, and write ownership |
 | Guard and approval lifecycle | `runtime_wired`, `library-only` | P3 evaluates R0-R3 and durably pauses, decides, and consumes exact R2 requests |
+| Review/audit completion gate | `runtime_wired`, `library-only` | P4 replays role-bound decisions and permits `completed` only when required decisions resolve as `Pass` |
 
 P1 turns the P0 contracts into deterministic orchestration and replay. P2 adds a
 durable execution authority without adding a provider, network call, or live
 worker invocation. P3 adds a third logical authority for guarded effect closures;
 it shares the SQLite versioned-state database with execution lifecycle state and
 does not add live HTTP, provider, service, authentication, or credential wiring.
+P4 adds structural review/audit completion enforcement over the JSONL run log;
+it does not call a live reviewer, auditor, provider, or evidence-byte verifier.
 
 ## Bootstrap workflow
 
@@ -96,7 +99,7 @@ flowchart TD
     Match -->|"No"| Mismatch["Reject without consumption"]
     Match -->|"Yes"| Consume["CAS approved to consumed"]
     Consume --> Effect["Invoke effect closure at most once"]
-    Effect --> Gates["Return Reviewer and Auditor requirements for downstream P4 enforcement"]
+    Effect --> Gates["Return requirements; P4 records separate durable completion decisions"]
 ```
 
 R2 covers repository writes, network actions, publication, and external side
@@ -108,8 +111,10 @@ authentication, tenancy, credential, session, or identity proof.
 Consumption occurs before the effect closure. Approval consumption and an
 external side effect are not one transaction. Failure or panic after consumption
 can leave no external effect while still enforcing at-most-once/no-retry. P3
-returns Reviewer and Auditor requirements but does not satisfy their evidence
-decisions; that completion enforcement belongs to P4.
+returns Reviewer and Auditor requirements but does not create their decisions.
+P4 later records role-bound decision events in the JSONL run, replays them with
+the evidence catalog, and blocks `completed` unless the required resolution is
+`Pass`. This is a separate library path, not a live review or provider call.
 
 ## Authority matrix
 

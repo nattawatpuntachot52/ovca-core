@@ -48,7 +48,11 @@ replays them into a `RunRecord`. An explicit, idempotent P2 bootstrap validates
 that planned JSONL state before initializing SQLite execution leases and write
 ownership. P3 adds deterministic input, output, and tool guards plus a durable
 pause/decision/resume boundary for sensitive R2 operations; R3 is denied by
-default. Orchestration, execution lifecycle, and approval are three logical
+default. P4 records caller-supplied, role-bound Reviewer and Auditor decisions
+with evidence references as replayable events. A transition to `completed` is
+accepted only when the risk-selected decisions validate and resolve as `Pass`;
+missing, failed, or disagreeing decisions remain non-terminal. Orchestration,
+execution lifecycle, and approval are three logical
 authorities over two durable media: JSONL and one shared SQLite versioned-state
 database. Execution and approval use separate entity namespaces in that database.
 The APIs expose no combined execution-plus-approval transaction, and JSONL and
@@ -134,10 +138,14 @@ provider. The P3 approval ledger is a third logical authority. It uses the
 `guard_approval:` namespace in the same SQLite versioned-state database as the P2
 `execution_run:` lifecycle namespace. Current APIs expose no combined
 execution-plus-approval transaction. R2 owner approval is consumed before the
-effect closure, while Reviewer and Auditor requirements are returned for
-downstream enforcement rather than completed by P3. An `ExplicitOwner` value is
-a typed caller assertion, not authentication or identity proof. Explicit review
-and audit flags select whether valid completion evidence is accepted from
-`running`, `reviewing`, or `auditing`; approval alone does not select those gates.
+effect closure. P3 returns Reviewer and Auditor requirements but does not create
+their decisions. P4 independently records and replays the required decisions
+with the evidence catalog before it accepts `completed`; a missing decision or a
+Reviewer/Auditor disagreement blocks completion, while R0/no-review runs remain
+compatible. An `ExplicitOwner` value is a typed caller assertion, not
+authentication or identity proof. Explicit review and audit flags select whether
+valid completion evidence is accepted from `running`, `reviewing`, or `auditing`;
+approval alone does not select those gates. This remains a library-only path: it
+does not invoke a live reviewer, auditor, worker, or provider.
 
 Licensed under Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

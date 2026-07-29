@@ -81,6 +81,8 @@ string_id!(LeaseId);
 string_id!(IdempotencyKey);
 string_id!(GuardRequestId);
 string_id!(ApprovalRequestId);
+string_id!(ReviewDecisionId);
+string_id!(AuditDecisionId);
 
 /// Public runtime roles. Legacy identities are intentionally not part of this contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -274,6 +276,15 @@ pub enum GuardOutcome {
     },
 }
 
+/// Durable review and audit gates selected by guard evaluation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewAuditRequirements {
+    pub contract_version: ContractVersion,
+    /// Sorted requirements make replay fixtures independent of insertion order.
+    #[serde(default)]
+    pub guard_requirements: BTreeSet<GuardRequirement>,
+}
+
 /// A project groups goal contracts without embedding runtime behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
@@ -452,6 +463,108 @@ pub struct EvidenceRef {
     pub produced_at: DateTime<Utc>,
 }
 
+/// Goal-contract criterion category assessed by a Reviewer or Auditor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CriterionKind {
+    Acceptance,
+    Verification,
+    DefinitionOfDone,
+}
+
+/// Evidence-backed assessment outcome for one exact criterion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CriterionAssessmentVerdict {
+    Satisfied,
+    Unsatisfied,
+}
+
+/// Record-only decision verdict. P4A2 must re-derive and validate this value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewVerdict {
+    Pass,
+    Fail,
+}
+
+/// Assessment of one exact goal criterion using external evidence references.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CriterionAssessment {
+    pub contract_version: ContractVersion,
+    pub kind: CriterionKind,
+    /// Exact criterion text copied from the goal contract.
+    pub criterion: String,
+    pub verdict: CriterionAssessmentVerdict,
+    /// Evidence bytes remain external to this contract.
+    #[serde(default)]
+    pub evidence_refs: Vec<EvidenceId>,
+    pub rationale: String,
+}
+
+/// Caller-supplied Reviewer decision record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewDecision {
+    pub contract_version: ContractVersion,
+    pub id: ReviewDecisionId,
+    pub run_id: RunId,
+    pub goal_id: GoalId,
+    /// P4A2 enforces that this role is [`Role::Reviewer`].
+    pub producer_role: Role,
+    /// P4A2 re-derives and validates this record-only verdict from assessments.
+    pub verdict: ReviewVerdict,
+    #[serde(default)]
+    pub assessments: Vec<CriterionAssessment>,
+    pub summary: String,
+    pub decided_at: DateTime<Utc>,
+}
+
+/// Caller-supplied independent Auditor countercheck record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditDecision {
+    pub contract_version: ContractVersion,
+    pub id: AuditDecisionId,
+    pub run_id: RunId,
+    pub goal_id: GoalId,
+    pub review_decision_id: ReviewDecisionId,
+    /// P4A2 enforces that this role is [`Role::Auditor`].
+    pub producer_role: Role,
+    /// P4A2 re-derives and validates this record-only verdict from independently
+    /// supplied Auditor assessments.
+    pub verdict: ReviewVerdict,
+    #[serde(default)]
+    pub assessments: Vec<CriterionAssessment>,
+    pub summary: String,
+    pub decided_at: DateTime<Utc>,
+}
+
+/// Explicit deterministic outcome of the review and audit decision flow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReviewAuditResolution {
+    Pass {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        review_decision_id: Option<ReviewDecisionId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audit_decision_id: Option<AuditDecisionId>,
+    },
+    AwaitingReview,
+    AwaitingAudit {
+        review_decision_id: ReviewDecisionId,
+    },
+    Fail {
+        review_decision_id: ReviewDecisionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audit_decision_id: Option<AuditDecisionId>,
+    },
+    OwnerEscalation {
+        review_decision_id: ReviewDecisionId,
+        audit_decision_id: AuditDecisionId,
+        reviewer_verdict: ReviewVerdict,
+        auditor_verdict: ReviewVerdict,
+    },
+}
+
 /// Ordered run lifecycle states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -597,6 +710,18 @@ pub enum RunEventPayload {
     EvidenceAttached {
         evidence_id: EvidenceId,
     },
+    EvidenceReferenceRecorded {
+        evidence: EvidenceRef,
+    },
+    ReviewAuditRequirementsRecorded {
+        requirements: ReviewAuditRequirements,
+    },
+    ReviewDecisionRecorded {
+        decision: ReviewDecision,
+    },
+    AuditDecisionRecorded {
+        decision: AuditDecision,
+    },
     CompletionEvidenceRecorded {
         evidence: CompletionEvidence,
     },
@@ -716,6 +841,27 @@ pub fn validate_run_transition(
     goal_contract: Option<&GoalContract>,
     completion_evidence: Option<&CompletionEvidence>,
 ) -> Result<(), RunTransitionError> {
+    validate_run_transition_with_guard_requirements(
+        from,
+        to,
+        goal_contract,
+        completion_evidence,
+        &BTreeSet::new(),
+    )
+}
+
+/// Validate a requested run transition with additive review and audit guard gates.
+///
+/// Guard-required Auditor completion dominates Reviewer completion. Owner approval
+/// remains part of the separate approval lifecycle and does not select a completion
+/// gate.
+pub fn validate_run_transition_with_guard_requirements(
+    from: RunStatus,
+    to: RunStatus,
+    goal_contract: Option<&GoalContract>,
+    completion_evidence: Option<&CompletionEvidence>,
+    guard_requirements: &BTreeSet<GuardRequirement>,
+) -> Result<(), RunTransitionError> {
     if from.is_terminal() {
         return Err(RunTransitionError::TerminalState { from, to });
     }
@@ -740,7 +886,7 @@ pub fn validate_run_transition(
         goal.completion_precondition.contract_version,
     )?;
 
-    let required_gate = required_completion_gate(&goal.permission_profile);
+    let required_gate = required_completion_gate(&goal.permission_profile, guard_requirements);
     if from != required_gate {
         return Err(RunTransitionError::WrongCompletionGate {
             from,
@@ -800,10 +946,16 @@ pub fn validate_run_transition(
     Ok(())
 }
 
-fn required_completion_gate(permission_profile: &PermissionProfile) -> RunStatus {
-    if permission_profile.audit_required {
+fn required_completion_gate(
+    permission_profile: &PermissionProfile,
+    guard_requirements: &BTreeSet<GuardRequirement>,
+) -> RunStatus {
+    if permission_profile.audit_required || guard_requirements.contains(&GuardRequirement::Auditor)
+    {
         RunStatus::Auditing
-    } else if permission_profile.review_required {
+    } else if permission_profile.review_required
+        || guard_requirements.contains(&GuardRequirement::Reviewer)
+    {
         RunStatus::Reviewing
     } else {
         RunStatus::Running
@@ -886,6 +1038,73 @@ mod tests {
         }
     }
 
+    fn evidence_ref() -> EvidenceRef {
+        EvidenceRef {
+            contract_version: ContractVersion::current(),
+            id: EvidenceId::from("evidence-1"),
+            kind: EvidenceKind::TestResult,
+            reference: "test:ovca-types".into(),
+            producer_role: Role::Engineer,
+            integrity: Some(IntegrityMetadata {
+                contract_version: ContractVersion::current(),
+                algorithm: "sha256".into(),
+                digest: "0123456789abcdef".into(),
+            }),
+            produced_at: timestamp(),
+        }
+    }
+
+    fn reviewer_assessment() -> CriterionAssessment {
+        CriterionAssessment {
+            contract_version: ContractVersion::current(),
+            kind: CriterionKind::Acceptance,
+            criterion: "Contracts serialize".into(),
+            verdict: CriterionAssessmentVerdict::Satisfied,
+            evidence_refs: vec![EvidenceId::from("evidence-review-1")],
+            rationale: "The exact contract fixture round-trips".into(),
+        }
+    }
+
+    fn auditor_assessment() -> CriterionAssessment {
+        CriterionAssessment {
+            contract_version: ContractVersion::current(),
+            kind: CriterionKind::Verification,
+            criterion: "Unit tests pass".into(),
+            verdict: CriterionAssessmentVerdict::Unsatisfied,
+            evidence_refs: vec![EvidenceId::from("evidence-audit-1")],
+            rationale: "The independent countercheck found a failing test".into(),
+        }
+    }
+
+    fn review_decision() -> ReviewDecision {
+        ReviewDecision {
+            contract_version: ContractVersion::current(),
+            id: ReviewDecisionId::from("review-1"),
+            run_id: RunId::from("run-1"),
+            goal_id: GoalId::from("goal-1"),
+            producer_role: Role::Reviewer,
+            verdict: ReviewVerdict::Pass,
+            assessments: vec![reviewer_assessment()],
+            summary: "Reviewer criteria are satisfied".into(),
+            decided_at: timestamp(),
+        }
+    }
+
+    fn audit_decision() -> AuditDecision {
+        AuditDecision {
+            contract_version: ContractVersion::current(),
+            id: AuditDecisionId::from("audit-1"),
+            run_id: RunId::from("run-1"),
+            goal_id: GoalId::from("goal-1"),
+            review_decision_id: ReviewDecisionId::from("review-1"),
+            producer_role: Role::Auditor,
+            verdict: ReviewVerdict::Fail,
+            assessments: vec![auditor_assessment()],
+            summary: "Auditor countercheck disagrees".into(),
+            decided_at: timestamp(),
+        }
+    }
+
     fn assert_round_trip<T>(value: &T)
     where
         T: Debug + PartialEq + Serialize + DeserializeOwned,
@@ -930,6 +1149,204 @@ mod tests {
         );
         assert_round_trip(&guard_id);
         assert_round_trip(&approval_id);
+    }
+
+    #[test]
+    fn review_and_audit_decision_ids_are_transparent_strings() {
+        let review_id = ReviewDecisionId::new("review-1");
+        let audit_id = AuditDecisionId::new("audit-1");
+
+        assert_eq!(serde_json::to_value(&review_id).unwrap(), json!("review-1"));
+        assert_eq!(serde_json::to_value(&audit_id).unwrap(), json!("audit-1"));
+        assert_round_trip(&review_id);
+        assert_round_trip(&audit_id);
+    }
+
+    #[test]
+    fn review_contract_enums_use_exact_snake_case_json() {
+        let criterion_kinds = [
+            (CriterionKind::Acceptance, "acceptance"),
+            (CriterionKind::Verification, "verification"),
+            (CriterionKind::DefinitionOfDone, "definition_of_done"),
+        ];
+        for (variant, expected) in criterion_kinds {
+            assert_eq!(serde_json::to_value(variant).unwrap(), json!(expected));
+            assert_round_trip(&variant);
+        }
+
+        let assessment_verdicts = [
+            (CriterionAssessmentVerdict::Satisfied, "satisfied"),
+            (CriterionAssessmentVerdict::Unsatisfied, "unsatisfied"),
+        ];
+        for (variant, expected) in assessment_verdicts {
+            assert_eq!(serde_json::to_value(variant).unwrap(), json!(expected));
+            assert_round_trip(&variant);
+        }
+
+        let review_verdicts = [(ReviewVerdict::Pass, "pass"), (ReviewVerdict::Fail, "fail")];
+        for (variant, expected) in review_verdicts {
+            assert_eq!(serde_json::to_value(variant).unwrap(), json!(expected));
+            assert_round_trip(&variant);
+        }
+    }
+
+    #[test]
+    fn criterion_assessment_has_exact_json_and_round_trips() {
+        let assessment = reviewer_assessment();
+
+        assert_eq!(
+            serde_json::to_value(&assessment).unwrap(),
+            json!({
+                "contract_version": 1,
+                "kind": "acceptance",
+                "criterion": "Contracts serialize",
+                "verdict": "satisfied",
+                "evidence_refs": ["evidence-review-1"],
+                "rationale": "The exact contract fixture round-trips"
+            })
+        );
+        assert_round_trip(&assessment);
+        assert_eq!(
+            serde_json::to_string(&assessment).unwrap(),
+            serde_json::to_string(&assessment).unwrap()
+        );
+    }
+
+    #[test]
+    fn review_decision_has_exact_json_and_round_trips() {
+        let decision = review_decision();
+
+        assert_eq!(
+            serde_json::to_value(&decision).unwrap(),
+            json!({
+                "contract_version": 1,
+                "id": "review-1",
+                "run_id": "run-1",
+                "goal_id": "goal-1",
+                "producer_role": "reviewer",
+                "verdict": "pass",
+                "assessments": [{
+                    "contract_version": 1,
+                    "kind": "acceptance",
+                    "criterion": "Contracts serialize",
+                    "verdict": "satisfied",
+                    "evidence_refs": ["evidence-review-1"],
+                    "rationale": "The exact contract fixture round-trips"
+                }],
+                "summary": "Reviewer criteria are satisfied",
+                "decided_at": "2026-07-16T09:30:00Z"
+            })
+        );
+        assert_round_trip(&decision);
+        assert_eq!(
+            serde_json::to_string(&decision).unwrap(),
+            serde_json::to_string(&decision).unwrap()
+        );
+    }
+
+    #[test]
+    fn audit_decision_has_exact_independent_json_and_round_trips() {
+        let decision = audit_decision();
+
+        assert_eq!(
+            serde_json::to_value(&decision).unwrap(),
+            json!({
+                "contract_version": 1,
+                "id": "audit-1",
+                "run_id": "run-1",
+                "goal_id": "goal-1",
+                "review_decision_id": "review-1",
+                "producer_role": "auditor",
+                "verdict": "fail",
+                "assessments": [{
+                    "contract_version": 1,
+                    "kind": "verification",
+                    "criterion": "Unit tests pass",
+                    "verdict": "unsatisfied",
+                    "evidence_refs": ["evidence-audit-1"],
+                    "rationale": "The independent countercheck found a failing test"
+                }],
+                "summary": "Auditor countercheck disagrees",
+                "decided_at": "2026-07-16T09:30:00Z"
+            })
+        );
+        assert_round_trip(&decision);
+        assert_eq!(
+            serde_json::to_string(&decision).unwrap(),
+            serde_json::to_string(&decision).unwrap()
+        );
+    }
+
+    #[test]
+    fn review_audit_resolution_has_exact_deterministic_json_for_every_shape() {
+        let cases = [
+            (
+                ReviewAuditResolution::Pass {
+                    review_decision_id: None,
+                    audit_decision_id: None,
+                },
+                r#"{"type":"pass"}"#,
+            ),
+            (
+                ReviewAuditResolution::Pass {
+                    review_decision_id: Some(ReviewDecisionId::from("review-1")),
+                    audit_decision_id: None,
+                },
+                r#"{"type":"pass","review_decision_id":"review-1"}"#,
+            ),
+            (
+                ReviewAuditResolution::Pass {
+                    review_decision_id: None,
+                    audit_decision_id: Some(AuditDecisionId::from("audit-1")),
+                },
+                r#"{"type":"pass","audit_decision_id":"audit-1"}"#,
+            ),
+            (
+                ReviewAuditResolution::Pass {
+                    review_decision_id: Some(ReviewDecisionId::from("review-1")),
+                    audit_decision_id: Some(AuditDecisionId::from("audit-1")),
+                },
+                r#"{"type":"pass","review_decision_id":"review-1","audit_decision_id":"audit-1"}"#,
+            ),
+            (
+                ReviewAuditResolution::AwaitingReview,
+                r#"{"type":"awaiting_review"}"#,
+            ),
+            (
+                ReviewAuditResolution::AwaitingAudit {
+                    review_decision_id: ReviewDecisionId::from("review-1"),
+                },
+                r#"{"type":"awaiting_audit","review_decision_id":"review-1"}"#,
+            ),
+            (
+                ReviewAuditResolution::Fail {
+                    review_decision_id: ReviewDecisionId::from("review-1"),
+                    audit_decision_id: None,
+                },
+                r#"{"type":"fail","review_decision_id":"review-1"}"#,
+            ),
+            (
+                ReviewAuditResolution::Fail {
+                    review_decision_id: ReviewDecisionId::from("review-1"),
+                    audit_decision_id: Some(AuditDecisionId::from("audit-1")),
+                },
+                r#"{"type":"fail","review_decision_id":"review-1","audit_decision_id":"audit-1"}"#,
+            ),
+            (
+                ReviewAuditResolution::OwnerEscalation {
+                    review_decision_id: ReviewDecisionId::from("review-1"),
+                    audit_decision_id: AuditDecisionId::from("audit-1"),
+                    reviewer_verdict: ReviewVerdict::Pass,
+                    auditor_verdict: ReviewVerdict::Fail,
+                },
+                r#"{"type":"owner_escalation","review_decision_id":"review-1","audit_decision_id":"audit-1","reviewer_verdict":"pass","auditor_verdict":"fail"}"#,
+            ),
+        ];
+
+        for (resolution, expected) in cases {
+            assert_eq!(serde_json::to_string(&resolution).unwrap(), expected);
+            assert_round_trip(&resolution);
+        }
     }
 
     #[test]
@@ -1137,6 +1554,146 @@ mod tests {
     }
 
     #[test]
+    fn review_audit_requirements_have_exact_deterministic_json_and_round_trip() {
+        let requirements = ReviewAuditRequirements {
+            contract_version: ContractVersion::current(),
+            guard_requirements: BTreeSet::from([
+                GuardRequirement::Auditor,
+                GuardRequirement::OwnerApproval,
+                GuardRequirement::Reviewer,
+            ]),
+        };
+
+        let expected = r#"{"contract_version":1,"guard_requirements":["owner_approval","reviewer","auditor"]}"#;
+        assert_eq!(serde_json::to_string(&requirements).unwrap(), expected);
+        assert_eq!(
+            serde_json::to_string(&requirements).unwrap(),
+            serde_json::to_string(&requirements).unwrap()
+        );
+        assert_round_trip(&requirements);
+    }
+
+    #[test]
+    fn durable_review_audit_event_payloads_have_exact_json_and_round_trip() {
+        let cases = [
+            (
+                RunEventPayload::EvidenceReferenceRecorded {
+                    evidence: evidence_ref(),
+                },
+                json!({
+                    "type": "evidence_reference_recorded",
+                    "evidence": {
+                        "contract_version": 1,
+                        "id": "evidence-1",
+                        "kind": "test_result",
+                        "reference": "test:ovca-types",
+                        "producer_role": "engineer",
+                        "integrity": {
+                            "contract_version": 1,
+                            "algorithm": "sha256",
+                            "digest": "0123456789abcdef"
+                        },
+                        "produced_at": "2026-07-16T09:30:00Z"
+                    }
+                }),
+            ),
+            (
+                RunEventPayload::ReviewAuditRequirementsRecorded {
+                    requirements: ReviewAuditRequirements {
+                        contract_version: ContractVersion::current(),
+                        guard_requirements: BTreeSet::from([
+                            GuardRequirement::Auditor,
+                            GuardRequirement::Reviewer,
+                        ]),
+                    },
+                },
+                json!({
+                    "type": "review_audit_requirements_recorded",
+                    "requirements": {
+                        "contract_version": 1,
+                        "guard_requirements": ["reviewer", "auditor"]
+                    }
+                }),
+            ),
+            (
+                RunEventPayload::ReviewDecisionRecorded {
+                    decision: review_decision(),
+                },
+                json!({
+                    "type": "review_decision_recorded",
+                    "decision": {
+                        "contract_version": 1,
+                        "id": "review-1",
+                        "run_id": "run-1",
+                        "goal_id": "goal-1",
+                        "producer_role": "reviewer",
+                        "verdict": "pass",
+                        "assessments": [{
+                            "contract_version": 1,
+                            "kind": "acceptance",
+                            "criterion": "Contracts serialize",
+                            "verdict": "satisfied",
+                            "evidence_refs": ["evidence-review-1"],
+                            "rationale": "The exact contract fixture round-trips"
+                        }],
+                        "summary": "Reviewer criteria are satisfied",
+                        "decided_at": "2026-07-16T09:30:00Z"
+                    }
+                }),
+            ),
+            (
+                RunEventPayload::AuditDecisionRecorded {
+                    decision: audit_decision(),
+                },
+                json!({
+                    "type": "audit_decision_recorded",
+                    "decision": {
+                        "contract_version": 1,
+                        "id": "audit-1",
+                        "run_id": "run-1",
+                        "goal_id": "goal-1",
+                        "review_decision_id": "review-1",
+                        "producer_role": "auditor",
+                        "verdict": "fail",
+                        "assessments": [{
+                            "contract_version": 1,
+                            "kind": "verification",
+                            "criterion": "Unit tests pass",
+                            "verdict": "unsatisfied",
+                            "evidence_refs": ["evidence-audit-1"],
+                            "rationale": "The independent countercheck found a failing test"
+                        }],
+                        "summary": "Auditor countercheck disagrees",
+                        "decided_at": "2026-07-16T09:30:00Z"
+                    }
+                }),
+            ),
+        ];
+
+        for (payload, expected) in cases {
+            assert_eq!(serde_json::to_value(&payload).unwrap(), expected);
+            assert_eq!(
+                serde_json::to_string(&payload).unwrap(),
+                serde_json::to_string(&payload).unwrap()
+            );
+            assert_round_trip(&payload);
+        }
+    }
+
+    #[test]
+    fn legacy_evidence_attached_event_shape_remains_unchanged() {
+        let payload = RunEventPayload::EvidenceAttached {
+            evidence_id: EvidenceId::from("evidence-legacy-1"),
+        };
+
+        assert_eq!(
+            serde_json::to_string(&payload).unwrap(),
+            r#"{"type":"evidence_attached","evidence_id":"evidence-legacy-1"}"#
+        );
+        assert_round_trip(&payload);
+    }
+
+    #[test]
     fn retry_budget_max_attempts_includes_first_claim_as_kernel_input() {
         let budget = RetryBudget {
             contract_version: ContractVersion::current(),
@@ -1297,19 +1854,7 @@ mod tests {
             created_at: timestamp(),
             updated_at: timestamp(),
         };
-        let evidence = EvidenceRef {
-            contract_version: ContractVersion::current(),
-            id: EvidenceId::from("evidence-1"),
-            kind: EvidenceKind::TestResult,
-            reference: "test:ovca-types".into(),
-            producer_role: Role::Engineer,
-            integrity: Some(IntegrityMetadata {
-                contract_version: ContractVersion::current(),
-                algorithm: "sha256".into(),
-                digest: "0123456789abcdef".into(),
-            }),
-            produced_at: timestamp(),
-        };
+        let evidence = evidence_ref();
         let run = RunRecord {
             contract_version: ContractVersion::current(),
             id: RunId::from("run-1"),
@@ -1334,6 +1879,10 @@ mod tests {
         assert_round_trip(&evidence);
         assert_round_trip(&permission_profile());
         assert_round_trip(&completion_evidence());
+        assert_round_trip(&ReviewAuditRequirements {
+            contract_version: ContractVersion::current(),
+            guard_requirements: BTreeSet::from([GuardRequirement::Reviewer]),
+        });
         assert_round_trip(&RiskTier::R3);
         assert_round_trip(&RunStatus::AwaitingApproval);
     }
@@ -1387,6 +1936,229 @@ mod tests {
             Some(&completion_evidence()),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn legacy_transition_validator_matches_guard_aware_validator_with_empty_requirements() {
+        let empty = BTreeSet::new();
+        assert_eq!(
+            validate_run_transition(RunStatus::Draft, RunStatus::Accepted, None, None),
+            validate_run_transition_with_guard_requirements(
+                RunStatus::Draft,
+                RunStatus::Accepted,
+                None,
+                None,
+                &empty,
+            )
+        );
+
+        let goal = goal_contract();
+        let evidence = completion_evidence();
+        for from in [
+            RunStatus::Running,
+            RunStatus::Reviewing,
+            RunStatus::Auditing,
+        ] {
+            assert_eq!(
+                validate_run_transition(from, RunStatus::Completed, Some(&goal), Some(&evidence)),
+                validate_run_transition_with_guard_requirements(
+                    from,
+                    RunStatus::Completed,
+                    Some(&goal),
+                    Some(&evidence),
+                    &empty,
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn guard_only_reviewer_requires_reviewing_completion_gate() {
+        let mut goal = goal_contract();
+        goal.permission_profile.review_required = false;
+        let requirements = BTreeSet::from([GuardRequirement::Reviewer]);
+
+        assert_eq!(
+            validate_run_transition_with_guard_requirements(
+                RunStatus::Running,
+                RunStatus::Completed,
+                Some(&goal),
+                Some(&completion_evidence()),
+                &requirements,
+            ),
+            Err(RunTransitionError::WrongCompletionGate {
+                from: RunStatus::Running,
+                required: RunStatus::Reviewing,
+            })
+        );
+        validate_run_transition_with_guard_requirements(
+            RunStatus::Reviewing,
+            RunStatus::Completed,
+            Some(&goal),
+            Some(&completion_evidence()),
+            &requirements,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn guard_only_auditor_requires_auditing_completion_gate() {
+        let mut goal = goal_contract();
+        goal.permission_profile.review_required = false;
+        let requirements = BTreeSet::from([GuardRequirement::Auditor]);
+
+        for from in [RunStatus::Running, RunStatus::Reviewing] {
+            assert_eq!(
+                validate_run_transition_with_guard_requirements(
+                    from,
+                    RunStatus::Completed,
+                    Some(&goal),
+                    Some(&completion_evidence()),
+                    &requirements,
+                ),
+                Err(RunTransitionError::WrongCompletionGate {
+                    from,
+                    required: RunStatus::Auditing,
+                })
+            );
+        }
+        validate_run_transition_with_guard_requirements(
+            RunStatus::Auditing,
+            RunStatus::Completed,
+            Some(&goal),
+            Some(&completion_evidence()),
+            &requirements,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn guard_auditor_dominates_reviewer_independent_of_construction_order() {
+        let mut goal = goal_contract();
+        goal.permission_profile.review_required = false;
+        let reviewer_then_auditor = [GuardRequirement::Reviewer, GuardRequirement::Auditor]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let auditor_then_reviewer = [GuardRequirement::Auditor, GuardRequirement::Reviewer]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+
+        for requirements in [&reviewer_then_auditor, &auditor_then_reviewer] {
+            validate_run_transition_with_guard_requirements(
+                RunStatus::Auditing,
+                RunStatus::Completed,
+                Some(&goal),
+                Some(&completion_evidence()),
+                requirements,
+            )
+            .unwrap();
+            assert_eq!(
+                validate_run_transition_with_guard_requirements(
+                    RunStatus::Reviewing,
+                    RunStatus::Completed,
+                    Some(&goal),
+                    Some(&completion_evidence()),
+                    requirements,
+                ),
+                Err(RunTransitionError::WrongCompletionGate {
+                    from: RunStatus::Reviewing,
+                    required: RunStatus::Auditing,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn owner_approval_only_keeps_goal_selected_completion_gate() {
+        let goal = goal_contract();
+        let requirements = BTreeSet::from([GuardRequirement::OwnerApproval]);
+
+        validate_run_transition_with_guard_requirements(
+            RunStatus::Reviewing,
+            RunStatus::Completed,
+            Some(&goal),
+            Some(&completion_evidence()),
+            &requirements,
+        )
+        .unwrap();
+        assert_eq!(
+            validate_run_transition_with_guard_requirements(
+                RunStatus::Running,
+                RunStatus::Completed,
+                Some(&goal),
+                Some(&completion_evidence()),
+                &requirements,
+            ),
+            Err(RunTransitionError::WrongCompletionGate {
+                from: RunStatus::Running,
+                required: RunStatus::Reviewing,
+            })
+        );
+    }
+
+    #[test]
+    fn goal_required_gates_hold_with_empty_or_weaker_guard_requirements() {
+        let review_goal = goal_contract();
+        for requirements in [
+            BTreeSet::new(),
+            BTreeSet::from([GuardRequirement::OwnerApproval]),
+        ] {
+            validate_run_transition_with_guard_requirements(
+                RunStatus::Reviewing,
+                RunStatus::Completed,
+                Some(&review_goal),
+                Some(&completion_evidence()),
+                &requirements,
+            )
+            .unwrap();
+        }
+
+        let mut audit_goal = goal_contract();
+        audit_goal.permission_profile.audit_required = true;
+        for requirements in [
+            BTreeSet::new(),
+            BTreeSet::from([GuardRequirement::Reviewer]),
+        ] {
+            validate_run_transition_with_guard_requirements(
+                RunStatus::Auditing,
+                RunStatus::Completed,
+                Some(&audit_goal),
+                Some(&completion_evidence()),
+                &requirements,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn guard_aware_transition_validation_is_deterministic_across_repeated_calls() {
+        let mut goal = goal_contract();
+        goal.permission_profile.review_required = false;
+        let requirements = BTreeSet::from([
+            GuardRequirement::OwnerApproval,
+            GuardRequirement::Reviewer,
+            GuardRequirement::Auditor,
+        ]);
+        let expected = validate_run_transition_with_guard_requirements(
+            RunStatus::Reviewing,
+            RunStatus::Completed,
+            Some(&goal),
+            Some(&completion_evidence()),
+            &requirements,
+        );
+
+        for _ in 0..64 {
+            assert_eq!(
+                validate_run_transition_with_guard_requirements(
+                    RunStatus::Reviewing,
+                    RunStatus::Completed,
+                    Some(&goal),
+                    Some(&completion_evidence()),
+                    &requirements,
+                ),
+                expected
+            );
+        }
     }
 
     #[test]
