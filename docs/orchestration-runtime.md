@@ -81,8 +81,9 @@ caller-supplied external root. Construction remains filesystem-side-effect free.
 Execution records use the `execution_run:` entity namespace and approval records
 use `guard_approval:` in the same SQLite versioned-state database. The runtime
 exposes typed evaluation/record, guarded execution, owner decision, strict
-approval load, and exact approved-resume methods. Those APIs expose no combined
-execution-plus-approval transaction.
+approval load, exact approved-resume, and explicit run-associated redacted
+projection methods. Those APIs expose no combined execution-plus-approval or
+SQLite-to-JSONL transaction.
 
 ```mermaid
 flowchart TD
@@ -93,6 +94,9 @@ flowchart TD
     Tier -->|"R1"| ExecuteR1["Execute effect; return Reviewer requirement"]
     Tier -->|"R2"| Pause["Persist exact pending approval before effect"]
     Tier -->|"R3"| DenyR3["Deny by default before effect"]
+    ExecuteR0 --> Project["Append redacted guard result to explicit run"]
+    Pause --> Project
+    DenyR3 --> Project
     Pause --> Decision{"Typed caller decision"}
     Decision -->|"Denied"| Denied["Do not execute"]
     Decision -->|"Approved"| Match{"Exact request and permission match?"}
@@ -121,6 +125,7 @@ the evidence catalog, and blocks `completed` unless the required resolution is
 | Concern | Logical authority | Durable medium / namespace |
 |---|---|---|
 | Run events, orchestration status, declared task IDs, plan, evidence, and replay | P1 orchestration | JSONL event log |
+| Redacted closed P3 allow, pause, or deny result associated with an explicit run | P3 reporting projection | JSONL event log |
 | Claims, leases, heartbeats, attempts, terminal idempotency, CAS revision, and write owners | P2 execution lifecycle | Shared SQLite database, `execution_run:` entities |
 | Exact guard request, caller decision, approval state, and consumption | P3 approval ledger | Shared SQLite database, `guard_approval:` entities |
 | Shared run, goal, and exact task-set identity | Combined runtime-view validation | Reads JSONL orchestration and SQLite execution entities |
@@ -130,8 +135,9 @@ For example, a durable SQLite claim changes its task snapshot to `running` while
 JSONL remains `pending` until a caller explicitly appends a valid orchestration
 event. Approval state also changes independently in its SQLite entity namespace.
 Current APIs expose no combined execution-plus-approval transaction. JSONL and
-SQLite have no cross-medium transaction, outbox, projection, reconciliation, or
-fabricated atomicity.
+SQLite have no cross-medium transaction, outbox, reconciliation, or fabricated
+atomicity. `evaluate_run_guard_and_record` performs P3 evaluation before the
+redacted JSONL append, so failure can separate those operations.
 
 ## Append workflow
 
@@ -201,6 +207,11 @@ data when the caller supplies an external root.
 | `initialize_execution` | `ovca-langgraph` | Validate JSONL first, then idempotently bootstrap SQLite |
 | `load_runtime_view` | `ovca-langgraph` | Return both authorities after identity/task-set checks |
 | `execute_guarded` / `resume_approved` | `ovca-langgraph` | Preserve typed guard execution and approval errors at the runtime boundary |
+| `evaluate_run_guard_and_record` | `ovca-langgraph` | Evaluate P3 and append its closed, identifier-free result to an explicit run |
+| `build_goal_runtime_trace` | `ovca-observability` | Build one redacted canonical span per validated durable event |
+| `evaluate_run` | `ovca-langgraph` | Read JSONL twice and return deterministic completeness, parity, and outcome grades without mutation |
+| `execution_authority_evidence` | `ovca-observability` | Reduce authoritative reloaded P2 task state without exposing identifiers |
+| `guard_authority_evidence` | `ovca-observability` | Reduce an actual P3 result to allow, pause, or deny |
 
 ## Runtime limitations
 
@@ -211,7 +222,7 @@ data when the caller supplies an external root.
 - The kernel plans parallel waves but does not execute them.
 - Current APIs expose no combined execution-plus-approval transaction in the
   shared SQLite database. JSONL and SQLite have no cross-medium transaction,
-  lifecycle projection, outbox, or reconciliation.
+  P2 lifecycle projection, outbox, or reconciliation.
 - Combined two-medium behavior has no cross-process integration test yet.
 - No live worker or provider path validates execution against external effects.
 - P3 interrupts R2 closures in the library, but no live Reviewer action, live
@@ -219,6 +230,12 @@ data when the caller supplies an external root.
   effect is included.
 - Approval consumption precedes the effect and is not atomic with it. A failure
   or panic can consume approval without producing an external effect.
+- Canonical trace evaluation observes JSONL, including recorded redacted P3
+  outcomes. It does not project the independent SQLite execution lifecycle or
+  exact approval-ledger records.
+- `GuardRequest` carries no run ID. The additive association method requires one
+  explicitly and persists only closed policy facts.
+- The fixture-level `0.99` completeness threshold is not a production SLO.
 
 ## Verification map
 
@@ -231,6 +248,7 @@ data when the caller supplies an external root.
 | Bootstrap and validate-before-append behavior | `rust/ovca-langgraph/src/goal_runtime.rs` tests |
 | Two-store bootstrap, recovery, combined views, and authority divergence | `rust/ovca-langgraph/src/goal_runtime.rs` tests |
 | R0/R2/R3 guarded execution, reopen, mismatch, concurrent resume, and logical-authority independence | `rust/ovca-langgraph/src/goal_runtime.rs` tests |
+| Canonical trace, redaction, completeness, durable parity, actual P2/P3 authority outcomes, and P0-P4 outcomes | `rust/ovca-observability/tests/goal_runtime_evals.rs` and its versioned 41-case fixture |
 
 All run IDs, event IDs, worker IDs, lease IDs, idempotency keys, and timestamps
 are caller supplied. The runtime generates no implicit clock or identity values.

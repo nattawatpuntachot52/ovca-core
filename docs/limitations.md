@@ -23,7 +23,8 @@
 - There is no cross-process integration test for the combined two-store runtime
   yet; the SQLite authority has independent-connection concurrency coverage.
 - There is no JSONL projection or outbox for SQLite claim, heartbeat, retry,
-  completion, or cancellation lifecycle changes yet.
+  completion, or cancellation lifecycle changes yet. The only P3 projection is
+  the closed guard result; it is not an approval-ledger replica.
 - `ApprovalAuthority::ExplicitOwner` is a caller assertion, not authentication,
   tenancy, credential, or identity proof.
 - R2 approval is consumed before the effect closure. Consumption and an external
@@ -35,8 +36,22 @@
   reviewer or auditor, or validate live human/model judgment quality.
 - The APIs expose no combined execution-plus-approval transaction in shared
   SQLite. JSONL and SQLite are the two durable media and have no cross-medium
-  transaction, outbox, projection, or reconciliation guarantee.
+  transaction, outbox, or reconciliation guarantee. P3 evaluation and its
+  redacted JSONL append can therefore be separated by failure.
 - R3 is denied by default. P3 has no live HTTP, provider, service, authentication,
   or credential wiring.
 - No live worker or provider integration validates the durable execution path.
+- Goal runtime traces intentionally omit event metadata, free-form payloads, raw
+  IDs, and external evidence references. They cannot be used to recover those
+  values.
+- Read-only goal runtime evaluation covers JSONL orchestration evidence,
+  including recorded redacted P3 outcomes. It does not project SQLite lease,
+  retry, cancellation, idempotency, exact guard request, approval identifier, or
+  approval-ledger records into the trace.
+- P2 and P3 evidence reducers expose typed authority results separately.
+  `GuardRequest` has no run ID; `evaluate_run_guard_and_record` accepts one
+  explicitly and associates only the closed projection.
+- The trace completeness threshold is enforced against a deterministic
+  regression fixture. It is not a production telemetry SLO, and no hosted
+  ingestion, retention, sampling, alerting, or dashboard exists.
 - No trading, broker, order-routing, or capital-movement capability is enabled.

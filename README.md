@@ -14,6 +14,7 @@ keeps operational data outside the source tree.
 
 See [architecture](docs/architecture.md), the [goal runtime contract](docs/goal-runtime-contract.md),
 the [durable orchestration runtime](docs/orchestration-runtime.md),
+[goal runtime observability and evaluations](docs/observability-evals.md),
 [Policy Tools authority](docs/policy-tools-authority.md), [security boundary](docs/security-boundary.md),
 [dependency lock change](docs/dependency-lock-change.md), and [limitations](docs/limitations.md).
 
@@ -48,7 +49,9 @@ replays them into a `RunRecord`. An explicit, idempotent P2 bootstrap validates
 that planned JSONL state before initializing SQLite execution leases and write
 ownership. P3 adds deterministic input, output, and tool guards plus a durable
 pause/decision/resume boundary for sensitive R2 operations; R3 is denied by
-default. P4 records caller-supplied, role-bound Reviewer and Auditor decisions
+default. An additive runtime method associates the actual P3 result with an
+explicit run by appending a redacted, closed-policy JSONL projection. P4 records
+caller-supplied, role-bound Reviewer and Auditor decisions
 with evidence references as replayable events. A transition to `completed` is
 accepted only when the risk-selected decisions validate and resolve as `Pass`;
 missing, failed, or disagreeing decisions remain non-terminal. Orchestration,
@@ -58,6 +61,13 @@ database. Execution and approval use separate entity namespaces in that database
 The APIs expose no combined execution-plus-approval transaction, and JSONL and
 SQLite have no cross-medium transaction, outbox, or reconciliation. Coordinator
 is the only role allowed to record the final response.
+
+P5 adds a provider-independent canonical trace and deterministic completeness,
+durable-reload parity, and contract-outcome graders. The read-only
+`DurableGoalRuntime::evaluate_run` API loads JSONL twice and does not append
+events or open SQLite. Recorded P3 pauses and policy denials survive reload and
+cannot grade as successful completion. Its `0.99` completeness threshold is
+enforced by a 41-case regression fixture; it is not a production telemetry SLO.
 
 Read the [workflow-by-workflow system guide](docs/system-workflows.md) for inputs,
 outputs, failure states, evidence files, and a flowchart for each workflow.
@@ -147,5 +157,12 @@ authentication or identity proof. Explicit review and audit flags select whether
 valid completion evidence is accepted from `running`, `reviewing`, or `auditing`;
 approval alone does not select those gates. This remains a library-only path: it
 does not invoke a live reviewer, auditor, worker, or provider.
+The canonical P5 trace omits free-form payloads and metadata, uses trace-local
+opaque aliases, and reports only event-backed typed facts. It includes the
+redacted P3 run projection but never the exact SQLite guard request or approval
+record. P2 execution remains separate. Identifier-free evidence reducers also
+expose actual typed P2 durable state and direct P3 allow/pause/deny results.
+P3 authority persistence and JSONL projection append have no cross-medium
+transaction, outbox, or reconciliation guarantee.
 
 Licensed under Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

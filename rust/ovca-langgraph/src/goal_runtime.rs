@@ -1,4 +1,8 @@
 use chrono::{DateTime, Utc};
+use ovca_observability::{
+    evaluate_goal_runtime, guard_authority_projection, GoalRuntimeEvaluation,
+    GoalRuntimeEvaluationError,
+};
 use ovca_runtime_core::{
     replay_run, schedule_tasks, DurableApprovalError, DurableApprovalEvaluation,
     DurableApprovalRecord, DurableDecisionResult, DurableExecutionAuthority, DurableExecutionError,
@@ -178,6 +182,9 @@ pub enum DurableGoalRuntimeError {
     Replay {
         source: ReplayError,
     },
+    Evaluation {
+        source: GoalRuntimeEvaluationError,
+    },
     RunAlreadyExists {
         run_id: RunId,
     },
@@ -186,6 +193,9 @@ pub enum DurableGoalRuntimeError {
     },
     Execution {
         source: DurableExecutionError,
+    },
+    Guard {
+        source: DurableApprovalError,
     },
     BootstrapRunStatusMismatch {
         expected: RunStatus,
@@ -228,11 +238,15 @@ impl fmt::Display for DurableGoalRuntimeError {
             Self::Build { source } => write!(formatter, "failed to build planned run: {source}"),
             Self::Storage { source } => write!(formatter, "run-event storage failed: {source}"),
             Self::Replay { source } => write!(formatter, "run-event replay failed: {source}"),
+            Self::Evaluation { source } => {
+                write!(formatter, "run-event evaluation failed: {source}")
+            }
             Self::RunAlreadyExists { run_id } => {
                 write!(formatter, "run {run_id} already exists")
             }
             Self::RunNotFound { run_id } => write!(formatter, "run {run_id} was not found"),
             Self::Execution { source } => write!(formatter, "execution authority failed: {source}"),
+            Self::Guard { source } => write!(formatter, "guard authority failed: {source}"),
             Self::BootstrapRunStatusMismatch { expected, found } => write!(
                 formatter,
                 "execution bootstrap requires orchestration status {expected}, found {found}"
@@ -276,7 +290,9 @@ impl std::error::Error for DurableGoalRuntimeError {
             Self::Build { source } => Some(source),
             Self::Storage { source } => Some(source),
             Self::Replay { source } => Some(source),
+            Self::Evaluation { source } => Some(source),
             Self::Execution { source } => Some(source),
+            Self::Guard { source } => Some(source),
             Self::RunAlreadyExists { .. }
             | Self::RunNotFound { .. }
             | Self::BootstrapRunStatusMismatch { .. }
@@ -357,6 +373,40 @@ impl DurableGoalRuntime {
         context: &GuardEvaluationContext,
     ) -> Result<DurableApprovalEvaluation, DurableApprovalError> {
         self.guardrails.evaluate_and_record(request, context)
+    }
+
+    /// Evaluates P3 policy and appends its redacted result to an existing run.
+    ///
+    /// Approval-ledger persistence and JSONL append are separate operations and
+    /// do not form a cross-medium transaction.
+    pub fn evaluate_run_guard_and_record(
+        &self,
+        run_id: &RunId,
+        goal: &GoalContract,
+        request: &GuardRequest,
+        context: &GuardEvaluationContext,
+        stamp: EventStamp,
+    ) -> Result<ReplayedRun, DurableGoalRuntimeError> {
+        let current = self.load_run(run_id, goal)?;
+        let evaluation = self
+            .guardrails
+            .evaluate_and_record(request, context)
+            .map_err(|source| DurableGoalRuntimeError::Guard { source })?;
+        let projection = guard_authority_projection(&evaluation);
+        let event = RunEvent {
+            contract_version: ContractVersion::current(),
+            id: stamp.id,
+            run_id: run_id.clone(),
+            sequence: current.run_record.event_count,
+            previous_event_id: current.run_record.last_event_id,
+            occurred_at: stamp.occurred_at,
+            producer_role: Role::Coordinator,
+            payload: RunEventPayload::GuardOutcomeRecorded {
+                projection: projection.clone(),
+            },
+            metadata: BTreeMap::new(),
+        };
+        self.append_event(event, goal)
     }
 
     /// Executes an allowed effect, records an R2 pause, or returns an R3 denial.
@@ -543,6 +593,27 @@ impl DurableGoalRuntime {
         }
 
         replay_run(&events, Some(goal)).map_err(|source| DurableGoalRuntimeError::Replay { source })
+    }
+
+    /// Loads the durable event stream twice and evaluates canonical replay parity
+    /// without appending JSONL, opening SQLite, or changing execution state.
+    pub fn evaluate_run(
+        &self,
+        run_id: &RunId,
+        goal: &GoalContract,
+    ) -> Result<GoalRuntimeEvaluation, DurableGoalRuntimeError> {
+        validate_goal_contract_versions(goal)
+            .map_err(|source| DurableGoalRuntimeError::Build { source })?;
+
+        let persisted_events = self.log.load_run(run_id)?;
+        if persisted_events.is_empty() {
+            return Err(DurableGoalRuntimeError::RunNotFound {
+                run_id: run_id.clone(),
+            });
+        }
+        let reloaded_events = self.log.load_run(run_id)?;
+        evaluate_goal_runtime(&persisted_events, &reloaded_events, goal)
+            .map_err(|source| DurableGoalRuntimeError::Evaluation { source })
     }
 }
 
@@ -838,15 +909,17 @@ fn validate_stamps(stamps: &PlannedRunStamps) -> Result<(), GoalRuntimeError> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use ovca_observability::GoalRuntimeEvaluationOutcome;
     use ovca_runtime_core::ClaimRequest;
     use ovca_storage::VERSIONED_STATE_DB_RELATIVE_PATH;
     use ovca_types::{
         ApprovalAuthority, ApprovalDisposition, ApprovalState, AuditDecision, AuditDecisionId,
         CompletionEvidence, CompletionPrecondition, CoordinatorFinalResponse, CriterionAssessment,
         CriterionAssessmentVerdict, CriterionKind, EvidenceId, EvidenceKind, EvidenceRef,
-        ExecutionMode, GuardRequestId, GuardRequirement, GuardSurface, LeaseId, PermissionProfile,
-        ProjectId, ReviewAuditRequirements, ReviewAuditResolution, ReviewDecision,
-        ReviewDecisionId, ReviewVerdict, RiskTier, SideEffectClass, SpecialistOutput, WorkerId,
+        ExecutionMode, GuardDenyReason, GuardRequestId, GuardRequirement, GuardSurface, LeaseId,
+        PermissionProfile, ProjectId, ReviewAuditRequirements, ReviewAuditResolution,
+        ReviewDecision, ReviewDecisionId, ReviewVerdict, RiskTier, RunGuardDecision,
+        SideEffectClass, SpecialistOutput, WorkerId,
     };
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2163,6 +2236,19 @@ mod tests {
         assert_eq!(completed.review_audit_requirements, None);
         assert!(completed.review_decisions.is_empty());
         assert!(completed.audit_decisions.is_empty());
+        let before_evaluation = fs::read(runtime.log_path()).unwrap();
+        let database_path = runtime.execution_database_path();
+        assert!(!database_path.exists());
+        let evaluation = runtime.evaluate_run(&RunId::from("run-1"), &goal).unwrap();
+        assert!(evaluation.passes);
+        assert_eq!(evaluation.completeness.score, 1.0);
+        assert!(evaluation.replay_parity.canonical_match);
+        assert_eq!(
+            evaluation.invariants.outcome,
+            GoalRuntimeEvaluationOutcome::SuccessfulCompletion
+        );
+        assert_eq!(fs::read(runtime.log_path()).unwrap(), before_evaluation);
+        assert!(!database_path.exists());
         let reopened = DurableGoalRuntime::new(dir.path());
         assert_eq!(
             reopened.load_run(&RunId::from("run-1"), &goal).unwrap(),
@@ -2211,6 +2297,14 @@ mod tests {
                 }
             }
         ));
+        assert_eq!(fs::read(runtime.log_path()).unwrap(), before);
+        let evaluation = runtime.evaluate_run(&RunId::from("run-1"), &goal).unwrap();
+        assert!(!evaluation.passes);
+        assert_eq!(
+            evaluation.invariants.outcome,
+            GoalRuntimeEvaluationOutcome::AwaitingReview
+        );
+        assert_eq!(evaluation.trace.spans.len(), 9);
         assert_eq!(fs::read(runtime.log_path()).unwrap(), before);
         assert_eq!(
             runtime
@@ -2266,6 +2360,14 @@ mod tests {
                 }
             } if review_decision_id == ReviewDecisionId::from("review-1")
         ));
+        assert_eq!(fs::read(runtime.log_path()).unwrap(), before);
+        let evaluation = runtime.evaluate_run(&RunId::from("run-1"), &goal).unwrap();
+        assert!(!evaluation.passes);
+        assert_eq!(
+            evaluation.invariants.outcome,
+            GoalRuntimeEvaluationOutcome::AwaitingAudit
+        );
+        assert_eq!(evaluation.trace.spans.len(), 11);
         assert_eq!(fs::read(runtime.log_path()).unwrap(), before);
         assert_eq!(
             runtime
@@ -2336,6 +2438,14 @@ mod tests {
                 && audit_decision_id == AuditDecisionId::from("audit-1")
         ));
         assert_eq!(fs::read(runtime.log_path()).unwrap(), before);
+        let evaluation = runtime.evaluate_run(&RunId::from("run-1"), &goal).unwrap();
+        assert!(!evaluation.passes);
+        assert_eq!(
+            evaluation.invariants.outcome,
+            GoalRuntimeEvaluationOutcome::OwnerEscalation
+        );
+        assert_eq!(evaluation.trace.spans.len(), 12);
+        assert_eq!(fs::read(runtime.log_path()).unwrap(), before);
         assert_eq!(
             runtime
                 .load_run(&RunId::from("run-1"), &goal)
@@ -2344,6 +2454,184 @@ mod tests {
                 .status,
             RunStatus::Auditing
         );
+    }
+
+    #[test]
+    fn durable_run_guard_projection_preserves_pause_and_deny_after_reload() {
+        let pause_dir = TempDir::new().unwrap();
+        let goal = goal();
+        let pause_runtime = DurableGoalRuntime::new(pause_dir.path());
+        pause_runtime
+            .create_run(
+                RunId::from("run-1"),
+                &goal,
+                &[task("task-a", &[])],
+                stamps(),
+            )
+            .unwrap();
+        append_runtime_event(
+            &pause_runtime,
+            &goal,
+            4,
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Planned,
+                to: RunStatus::Running,
+            },
+        )
+        .unwrap();
+
+        let pause = pause_runtime
+            .evaluate_run_guard_and_record(
+                &RunId::from("run-1"),
+                &goal,
+                &guard_request(
+                    "guard-sensitive-pause",
+                    GuardSurface::Tool,
+                    SideEffectClass::NetworkAction,
+                ),
+                &guard_context("approval-sensitive-pause"),
+                EventStamp {
+                    id: EventId::from("event-5"),
+                    occurred_at: timestamp(21),
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            &pause.guard_outcomes.last().unwrap().outcome,
+            RunGuardDecision::Pause { .. }
+        ));
+        let pause_bytes = fs::read(pause_runtime.log_path()).unwrap();
+        let pause_jsonl = String::from_utf8(pause_bytes.clone()).unwrap();
+        for excluded in [
+            "guard-sensitive-pause",
+            "approval-sensitive-pause",
+            "guarded runtime operation",
+            "resource:runtime",
+            "write:runtime",
+        ] {
+            assert!(!pause_jsonl.contains(excluded));
+        }
+        let pause_reloaded = DurableGoalRuntime::new(pause_dir.path())
+            .load_run(&RunId::from("run-1"), &goal)
+            .unwrap();
+        assert_eq!(pause_reloaded, pause);
+        let pause_evaluation = DurableGoalRuntime::new(pause_dir.path())
+            .evaluate_run(&RunId::from("run-1"), &goal)
+            .unwrap();
+        assert_eq!(
+            pause_evaluation.invariants.outcome,
+            GoalRuntimeEvaluationOutcome::AwaitingApproval
+        );
+        assert!(!pause_evaluation.passes);
+        assert_eq!(fs::read(pause_runtime.log_path()).unwrap(), pause_bytes);
+
+        let deny_dir = TempDir::new().unwrap();
+        let deny_runtime = DurableGoalRuntime::new(deny_dir.path());
+        deny_runtime
+            .create_run(
+                RunId::from("run-1"),
+                &goal,
+                &[task("task-a", &[])],
+                stamps(),
+            )
+            .unwrap();
+        append_runtime_event(
+            &deny_runtime,
+            &goal,
+            4,
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Planned,
+                to: RunStatus::Running,
+            },
+        )
+        .unwrap();
+
+        let deny = deny_runtime
+            .evaluate_run_guard_and_record(
+                &RunId::from("run-1"),
+                &goal,
+                &guard_request(
+                    "guard-sensitive-deny",
+                    GuardSurface::Tool,
+                    SideEffectClass::Destructive,
+                ),
+                &guard_context("approval-sensitive-deny"),
+                EventStamp {
+                    id: EventId::from("event-5"),
+                    occurred_at: timestamp(21),
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            &deny.guard_outcomes.last().unwrap().outcome,
+            RunGuardDecision::Deny { reasons }
+                if reasons.contains(&GuardDenyReason::R3DenyByDefault)
+        ));
+        let deny_bytes = fs::read(deny_runtime.log_path()).unwrap();
+        let deny_reloaded = DurableGoalRuntime::new(deny_dir.path())
+            .load_run(&RunId::from("run-1"), &goal)
+            .unwrap();
+        assert_eq!(deny_reloaded, deny);
+        let deny_evaluation = DurableGoalRuntime::new(deny_dir.path())
+            .evaluate_run(&RunId::from("run-1"), &goal)
+            .unwrap();
+        assert_eq!(
+            deny_evaluation.invariants.outcome,
+            GoalRuntimeEvaluationOutcome::PolicyDenied
+        );
+        assert!(!deny_evaluation.passes);
+        assert_eq!(fs::read(deny_runtime.log_path()).unwrap(), deny_bytes);
+    }
+
+    #[test]
+    fn durable_evaluation_keeps_approval_pause_non_successful_and_read_only() {
+        let dir = TempDir::new().unwrap();
+        let goal = goal();
+        let runtime = DurableGoalRuntime::new(dir.path());
+        runtime
+            .create_run(
+                RunId::from("run-1"),
+                &goal,
+                &[task("task-a", &[])],
+                stamps(),
+            )
+            .unwrap();
+        append_runtime_event(
+            &runtime,
+            &goal,
+            4,
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Planned,
+                to: RunStatus::Running,
+            },
+        )
+        .unwrap();
+        append_runtime_event(
+            &runtime,
+            &goal,
+            5,
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Running,
+                to: RunStatus::AwaitingApproval,
+            },
+        )
+        .unwrap();
+        let before = fs::read(runtime.log_path()).unwrap();
+
+        let evaluation = runtime.evaluate_run(&RunId::from("run-1"), &goal).unwrap();
+
+        assert!(!evaluation.passes);
+        assert_eq!(
+            evaluation.invariants.outcome,
+            GoalRuntimeEvaluationOutcome::AwaitingApproval
+        );
+        assert_eq!(evaluation.trace.spans.len(), 6);
+        assert_eq!(fs::read(runtime.log_path()).unwrap(), before);
+        assert!(!runtime.execution_database_path().exists());
     }
 
     #[test]

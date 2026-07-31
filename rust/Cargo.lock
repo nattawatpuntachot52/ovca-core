@@ -886,6 +886,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ovca-auditor-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "dotenvy",
+ "ovca-llm-client",
+ "ovca-mcp",
+ "ovca-storage",
+ "ovca-types",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower 0.4.13",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ovca-brain"
 version = "0.1.0"
 dependencies = [
@@ -901,6 +920,25 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ovca-coordinator-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "dotenvy",
+ "ovca-llm-client",
+ "ovca-mcp",
+ "ovca-storage",
+ "ovca-types",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -924,44 +962,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ovca-reviewer-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "dotenvy",
- "ovca-llm-client",
- "ovca-mcp",
- "ovca-storage",
- "ovca-types",
- "serde_json",
- "tempfile",
- "tokio",
- "tower 0.4.13",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "ovca-coordinator-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "dotenvy",
- "ovca-llm-client",
- "ovca-mcp",
- "ovca-storage",
- "ovca-types",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "ovca-langgraph"
 version = "0.1.0"
 dependencies = [
@@ -969,6 +969,7 @@ dependencies = [
  "chrono",
  "ovca-brain",
  "ovca-llm-client",
+ "ovca-observability",
  "ovca-runtime-core",
  "ovca-storage",
  "ovca-types",
@@ -1022,31 +1023,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "ovca-auditor-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "dotenvy",
- "ovca-llm-client",
- "ovca-mcp",
- "ovca-storage",
- "ovca-types",
- "serde_json",
- "tempfile",
- "tokio",
- "tower 0.4.13",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "ovca-observability"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "chrono",
+ "ovca-runtime-core",
+ "ovca-storage",
+ "ovca-types",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1066,6 +1053,25 @@ dependencies = [
  "tokio",
  "tower 0.4.13",
  "tracing",
+]
+
+[[package]]
+name = "ovca-reviewer-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "dotenvy",
+ "ovca-llm-client",
+ "ovca-mcp",
+ "ovca-storage",
+ "ovca-types",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower 0.4.13",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

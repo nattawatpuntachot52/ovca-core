@@ -4,8 +4,8 @@ use ovca_types::{
     AuditDecisionId, CompletionEvidence, ContractVersion, CoordinatorFinalResponse, EventId,
     EvidenceId, EvidenceRef, ExecutionPlan, GoalContract, GoalId, ProjectId,
     ReviewAuditRequirements, ReviewAuditResolution, ReviewDecision, ReviewDecisionId, Role,
-    RunEvent, RunEventPayload, RunId, RunRecord, RunStatus, RunTransitionError, SpecialistOutput,
-    TaskId, TaskStatus,
+    RunEvent, RunEventPayload, RunGuardProjection, RunId, RunRecord, RunStatus, RunTransitionError,
+    SpecialistOutput, TaskId, TaskStatus,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -435,6 +435,7 @@ pub struct ReplayedRun {
     pub execution_plan: Option<ExecutionPlan>,
     pub task_statuses: BTreeMap<TaskId, TaskStatus>,
     pub evidence_references: Vec<EvidenceRef>,
+    pub guard_outcomes: Vec<RunGuardProjection>,
     pub review_audit_requirements: Option<ReviewAuditRequirements>,
     pub review_decisions: Vec<ReviewDecision>,
     pub audit_decisions: Vec<AuditDecision>,
@@ -522,6 +523,7 @@ pub fn replay_run(
     let mut evidence_ids = BTreeSet::new();
     let mut execution_plan = None;
     let mut evidence_references = Vec::new();
+    let mut guard_outcomes = Vec::new();
     let mut review_audit_requirements = None;
     let mut review_decision_ids = BTreeSet::new();
     let mut review_decisions = Vec::new();
@@ -672,6 +674,14 @@ pub fn replay_run(
                 }
                 run_record.evidence_refs.push(evidence.id.clone());
                 evidence_references.push(evidence.clone());
+            }
+            RunEventPayload::GuardOutcomeRecorded { projection } => {
+                validate_nested_contract_version(
+                    event.sequence,
+                    "run_guard_projection",
+                    projection.contract_version,
+                )?;
+                guard_outcomes.push(projection.clone());
             }
             RunEventPayload::ReviewAuditRequirementsRecorded { requirements } => {
                 validate_nested_contract_version(
@@ -840,6 +850,7 @@ pub fn replay_run(
         execution_plan,
         task_statuses,
         evidence_references,
+        guard_outcomes,
         review_audit_requirements,
         review_decisions,
         audit_decisions,

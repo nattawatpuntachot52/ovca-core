@@ -276,6 +276,31 @@ pub enum GuardOutcome {
     },
 }
 
+/// Redacted guard result safe for durable association with a goal run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case")]
+pub enum RunGuardDecision {
+    Allow {
+        #[serde(default)]
+        required_gates: BTreeSet<GuardRequirement>,
+    },
+    Pause {
+        #[serde(default)]
+        required_gates: BTreeSet<GuardRequirement>,
+    },
+    Deny {
+        #[serde(default)]
+        reasons: BTreeSet<GuardDenyReason>,
+    },
+}
+
+/// Versioned P3 projection containing closed policy facts only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunGuardProjection {
+    pub contract_version: ContractVersion,
+    pub outcome: RunGuardDecision,
+}
+
 /// Durable review and audit gates selected by guard evaluation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewAuditRequirements {
@@ -712,6 +737,9 @@ pub enum RunEventPayload {
     },
     EvidenceReferenceRecorded {
         evidence: EvidenceRef,
+    },
+    GuardOutcomeRecorded {
+        projection: RunGuardProjection,
     },
     ReviewAuditRequirementsRecorded {
         requirements: ReviewAuditRequirements,
@@ -1549,6 +1577,55 @@ mod tests {
             ])
         );
         assert_round_trip(&allow);
+        assert_round_trip(&pause);
+        assert_round_trip(&deny);
+    }
+
+    #[test]
+    fn run_guard_projection_contains_only_closed_policy_facts() {
+        let pause = RunGuardProjection {
+            contract_version: ContractVersion::current(),
+            outcome: RunGuardDecision::Pause {
+                required_gates: BTreeSet::from([
+                    GuardRequirement::OwnerApproval,
+                    GuardRequirement::Reviewer,
+                    GuardRequirement::Auditor,
+                ]),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&pause).unwrap(),
+            json!({
+                "contract_version": 1,
+                "outcome": {
+                    "decision": "pause",
+                    "required_gates": ["owner_approval", "reviewer", "auditor"]
+                }
+            })
+        );
+
+        let deny = RunGuardProjection {
+            contract_version: ContractVersion::current(),
+            outcome: RunGuardDecision::Deny {
+                reasons: BTreeSet::from([GuardDenyReason::R3DenyByDefault]),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&RunEventPayload::GuardOutcomeRecorded {
+                projection: deny.clone(),
+            })
+            .unwrap(),
+            json!({
+                "type": "guard_outcome_recorded",
+                "projection": {
+                    "contract_version": 1,
+                    "outcome": {
+                        "decision": "deny",
+                        "reasons": ["r3_deny_by_default"]
+                    }
+                }
+            })
+        );
         assert_round_trip(&pause);
         assert_round_trip(&deny);
     }

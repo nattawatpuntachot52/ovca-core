@@ -230,19 +230,55 @@ statuses to remain equal.
 
 `DurableGoalRuntime` also exposes typed wrappers for guard evaluation and record,
 guarded execution, decision recording, strict approval loading, and exact
-approved resume. These wrappers preserve `DurableApprovalError` and
-`GuardedExecution` semantics. Guard operations do not project `RunStatus` or
-`TaskStatus`, and lifecycle operations do not mutate approval state.
+approved resume. `evaluate_run_guard_and_record` accepts an explicit run,
+evaluates the existing P3 authority, and appends a `GuardOutcomeRecorded` event
+containing only a versioned `RunGuardProjection`. The projection is a closed
+allow, pause, or deny result with closed guard requirements or deny reasons. It
+contains no raw request, approval identifier, operation label, key, provider
+payload, filesystem location, credential, or caller identity. Guard operations
+do not project `RunStatus` or `TaskStatus`, and lifecycle operations do not
+mutate approval state.
 
 Current APIs expose no combined transaction across execution and approval entity
 operations in the shared SQLite database. JSONL and SQLite operations are not one
 cross-medium transaction and have no outbox, reconciliation, or atomicity claim.
+In particular, P3 authority evaluation and the JSONL projection append are
+ordered operations, not one transaction.
 A crash after `create_run` but before SQLite initialization leaves an explicit,
 recoverable bootstrap gap. Retrying `initialize_execution` with the identical
 task definition and retry budget either creates revision zero or returns the
 existing state. A failure between the four JSONL bootstrap appends can still
 leave a valid partial event stream; P1 does not repair it automatically. P2C adds
 no lifecycle event projection or outbox.
+
+## Read-only trace evaluation
+
+`ovca-observability` derives one canonical span per validated durable event.
+Spans contain event sequence, trace-local correlation aliases, public producer
+role, closed lifecycle and decision kinds, and typed status, plan, requirement,
+redacted P3 outcome, closed deny reason, and verdict facts. Raw IDs, event
+metadata, and free-form payload fields are not copied or hashed into the trace.
+
+`DurableGoalRuntime::evaluate_run` strictly loads the JSONL stream twice and
+requires both replays to validate against the supplied goal contract. The method
+does not append JSONL, open SQLite, or mutate execution or approval state.
+Completeness counts a fixed required-field schema for the authoritative event
+count. Canonical parity compares the candidate with the independently reloaded
+trace. Successful evaluation additionally requires a replayed successful
+completion. Recorded P3 pauses report `awaiting_approval`, recorded denials
+report `policy_denied`, and neither can pass. Failures, missing review/audit,
+Reviewer/Auditor disagreement, and R0 compatibility are also preserved.
+
+P2 execution evidence remains separate from canonical spans.
+`execution_authority_evidence` reduces an authoritative reloaded execution task
+to status, attempts, lease presence, and terminal outcome.
+`guard_authority_evidence` reduces an actual guard evaluation to allow, pause,
+or deny. `GuardRequest` carries no run ID; the additive runtime method supplies
+the explicit run association and persists only its redacted projection.
+
+See [goal runtime observability and evaluations](observability-evals.md). The
+documented `0.99` completeness threshold is a regression-fixture rule, not a
+production SLO.
 
 ## Verification surface
 
@@ -259,3 +295,5 @@ R2 pause paths, all 12 R3 deny paths, durable reopen, request and permission
 mismatch, exact concurrent at-most-once resume, logical-authority independence,
 path-safe IDs, and Coordinator-only final responses. See
 [durable orchestration runtime](orchestration-runtime.md) for the workflow map.
+The versioned observability fixture adds 41 persistent deterministic cases for
+trace completeness, durable parity, contract outcomes, and redaction.

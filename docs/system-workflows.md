@@ -522,7 +522,8 @@ decisions, and an external storage root.
 
 **Output:** An `ExecutionPlan`, durable linked events, replayed orchestration
 state, durable SQLite execution state, an independent approval record when R2
-pauses, and typed guarded-execution results.
+pauses, a redacted P3 result associated with an explicit run, typed
+guarded-execution results, and an optional read-only canonical trace evaluation.
 
 ```mermaid
 flowchart TD
@@ -541,6 +542,21 @@ flowchart TD
     Sqlite --> Combined["Return both authority views"]
 ```
 
+Read-only evaluation follows a separate path and does not open SQLite:
+
+```mermaid
+flowchart TD
+    Evaluate["evaluate_run"] --> LoadA["Strict JSONL load"]
+    Evaluate --> LoadB["Independent strict JSONL reload"]
+    LoadA --> ReplayA["Replay against GoalContract"]
+    LoadB --> ReplayB["Replay against GoalContract"]
+    ReplayA --> TraceA["Canonical redacted trace"]
+    ReplayB --> TraceB["Canonical reloaded trace"]
+    TraceA --> Grade["Completeness, parity, and outcome graders"]
+    TraceB --> Grade
+    Grade --> Result["Read-only GoalRuntimeEvaluation"]
+```
+
 Guarded effects use a third logical authority rooted below the same external
 root. Its entities share the SQLite versioned-state database with execution:
 
@@ -551,6 +567,9 @@ flowchart TD
     Policy -->|"R1"| ReviewGate["Execute and return Reviewer requirement"]
     Policy -->|"R2"| Pause["Persist exact guard_approval: entity in shared SQLite state DB"]
     Policy -->|"R3"| Deny["Deny by default before effect"]
+    Allow --> Project["Append closed P3 result to explicit JSONL run"]
+    Pause --> Project
+    Deny --> Project
     Pause --> Owner{"Typed caller owner decision"}
     Owner -->|"Denied"| Stop["Do not execute"]
     Owner -->|"Approved"| Exact{"Request and permission still exact?"}
@@ -568,10 +587,11 @@ caller decisions, and consumption. Execution uses `execution_run:` entities and
 approval uses `guard_approval:` entities in the same SQLite versioned-state
 database. These are three logical authorities over two durable media. Current
 APIs expose no combined execution-plus-approval transaction. JSONL and SQLite
-have no cross-medium transaction, outbox, projection, or reconciliation
-guarantee. A SQLite execution entity may show `running` while JSONL still shows
-`pending` and approval remains independently `pending`; the APIs expose those
-states without declaring any stale.
+have no cross-medium transaction, outbox, or reconciliation guarantee. The
+redacted P3 projection is appended after authority evaluation and is not an
+approval-ledger replica or atomic second write. A SQLite execution entity may
+show `running` while JSONL still shows `pending`; the APIs expose both states
+without declaring either stale.
 
 `ApprovalAuthority::ExplicitOwner` is a typed caller assertion, not
 authentication, tenancy, credential, session, or identity proof. P3 returns
@@ -583,6 +603,21 @@ only a resolved `Pass` may complete the run. Approval is consumed before the
 effect closure, and consumption is not atomic with an external side effect.
 Failure or panic after consumption can leave no external effect under the
 documented at-most-once/no-retry boundary.
+
+Canonical trace spans use trace-local run, event, and task aliases and retain
+only typed event-backed facts. Event metadata and free-form payloads are omitted.
+Completeness is measured against required fields for the authoritative event
+count; exact parity is checked after independent reload. Recorded P3 pauses,
+recorded policy denials, failed or missing decisions, disagreement, failed runs,
+and cancelled runs never grade as successful completion. The threshold and
+41-case dataset are regression fixture evidence, not a production telemetry SLO.
+
+P2/P3 regression cases invoke actual SQLite claim/lease, retry, idempotency, and
+cancellation commands and actual R0/R2/R3 guard evaluation. P2 evidence is
+extracted from reloaded durable task state. P3 results are reduced to closed
+projections, appended to JSONL, reloaded from bytes, and evaluated as
+run-associated allow, pause, or policy-denied outcomes. `GuardRequest` itself
+still has no run ID; the association method requires one explicitly.
 
 **Recovery:** `create_run` writes no SQLite state. If the process stops after the
 planned JSONL run is durable, the missing execution run is a recoverable gap.
@@ -598,12 +633,16 @@ run. Invalid R2 definitions deny or conflict before the effect; request or
 permission mismatch cannot resume; R3 denies before the effect. P3 includes no
 live HTTP, provider, service, authentication, or credential wiring. It adds no
 combined execution-plus-approval transaction, and JSONL/SQLite have no
-cross-medium transaction, projection, reconciliation, or outbox wiring.
+cross-medium transaction, P2 lifecycle projection, reconciliation, or outbox
+wiring. P3 authority success followed by JSONL append failure is not repaired
+automatically.
 
 **Evidence:** `rust/ovca-langgraph/src/goal_runtime.rs`,
 `rust/ovca-runtime-core/src/replay.rs`,
 `rust/ovca-storage/src/run_events.rs`,
-`docs/orchestration-runtime.md`
+`rust/ovca-observability/tests/goal_runtime_evals.rs`,
+`docs/orchestration-runtime.md`,
+`docs/observability-evals.md`
 
 ## 16. Workflow 12: Record runtime evidence and use brain context
 
@@ -697,7 +736,9 @@ and `healthy: false`.
   namespaces in one shared SQLite versioned-state database. P4 additionally
   blocks durable completion until the policy-required Reviewer/Auditor decisions
   replay, validate, and resolve as `Pass`; R0/no-review completion remains
-  compatible.
+  compatible. P5 adds a read-only canonical JSONL trace, including closed P3
+  outcomes, with deterministic completeness, durable-reload parity, and
+  contract-outcome graders.
 - The public startup does not launch the LangGraph, runtime guard, or brain
   libraries as independent services.
 
@@ -727,6 +768,7 @@ and `healthy: false`.
 | Route, grade, rewrite, and fallback behavior | Rust tests in `ovca-langgraph` |
 | Goal scheduling, durable append, and replay | Rust tests in `ovca-types`, `ovca-storage`, `ovca-runtime-core`, and `ovca-langgraph` |
 | P3 risk matrix, durable approval reopen, mismatch, and at-most-once resume | Rust tests in `ovca-runtime-core` and `ovca-langgraph` |
+| Goal runtime trace completeness, durable parity, redaction, actual P2/P3 authority outcomes, and P0-P4 regression | `rust/ovca-observability/tests/goal_runtime_evals.rs` and its versioned 41-case fixture |
 | Policy Tool behavior | Rust package tests and Python policy tests |
 | Rust/Python parity | `scripts/tests/test_policy_tools_rust_parity.py` |
 | Cognitive advisory helpers | `scripts/tests/test_cognitive_leadership_tools.py` |

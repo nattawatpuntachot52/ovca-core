@@ -13,6 +13,7 @@ description = "Oracle state machine - intake, route, specialist, grade, rewrite,
 ovca-types      = { path = "../ovca-types" }
 ovca-brain      = { path = "../ovca-brain" }
 ovca-llm-client = { path = "../ovca-llm-client" }
+ovca-observability = { path = "../ovca-observability" }
 ovca-runtime-core = { path = "../ovca-runtime-core" }
 ovca-storage    = { path = "../ovca-storage" }
 tokio             = { workspace = true }
