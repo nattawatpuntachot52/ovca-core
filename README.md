@@ -18,7 +18,39 @@ the [durable orchestration runtime](docs/orchestration-runtime.md),
 [Policy Tools authority](docs/policy-tools-authority.md), [security boundary](docs/security-boundary.md),
 [dependency lock change](docs/dependency-lock-change.md), and [limitations](docs/limitations.md).
 
-## How it works
+## Zoom out: two connected paths
+
+OVCA Core deliberately separates the local MCP services an operator can run
+today from the provider-independent Goal Runtime an application can embed. They
+can work together, but startup does not connect them implicitly or execute work
+on their behalf.
+
+| Path | Use it when | What it provides | What remains with the integrator |
+|---|---|---|---|
+| Local MCP services | You need local role tools, health checks, and task-packet/status surfaces | Five loopback services, shared MCP transport, and process-ownership receipts | Authentication, a client UI, worker execution, and operational data |
+| Goal Runtime library | You need deterministic planning, durable evidence, and policy-bound completion | Versioned contracts, JSONL replay, SQLite lifecycle and approvals, completion gates, and read-only evaluation | Storage roots, IDs and timestamps, worker/provider wiring, and live review or audit judgment |
+
+The Goal Runtime progresses through six additive library phases:
+
+```mermaid
+flowchart LR
+    P0["P0: contracts and transitions"] --> P1["P1: deterministic plan and JSONL replay"]
+    P1 --> P2["P2: SQLite claim, lease, retry, and write ownership"]
+    P2 --> P3["P3: risk guards and durable approvals"]
+    P3 --> P4["P4: Reviewer and Auditor completion gate"]
+    P4 --> P5["P5: redacted trace, replay parity, and evaluation"]
+```
+
+An embedding application makes the explicit connection: it supplies the goal,
+tasks, external roots, IDs, timestamps, and any provider or worker integration.
+P4 validates recorded decisions structurally; it does not summon a live Reviewer
+or Auditor. P5 is a deterministic regression-evaluation surface, not a hosted
+telemetry service or a production SLO.
+
+For a workflow-by-workflow explanation with inputs, outputs, failure states, and
+evidence files, read the [system workflow guide](docs/system-workflows.md).
+
+### Service and library map
 
 ```mermaid
 flowchart LR

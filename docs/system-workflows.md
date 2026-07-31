@@ -83,6 +83,41 @@ flowchart TD
 The solid lines are the public startup and HTTP surfaces. Dashed lines are
 library-level integration paths that require an embedding caller.
 
+## Zoom out: choose the operating path
+
+OVCA Core exposes two deliberately separate paths. The first is the local MCP
+runtime that an operator starts today. The second is the provider-independent
+Goal Runtime that an application embeds explicitly. Neither path claims to
+perform live worker execution, authenticate an owner, call a provider, or make a
+semantic review or audit judgment by itself.
+
+```mermaid
+flowchart TB
+    Operator["Operator or local client"] --> Start["Start five loopback MCP services"]
+    Start --> Tools["Discover role and Policy Tools"]
+    Host["Embedding application"] --> Contracts["P0 contracts"]
+    Contracts --> Plan["P1 plan and durable JSONL replay"]
+    Plan --> Lifecycle["P2 SQLite execution lifecycle"]
+    Lifecycle --> Guards["P3 guard and approval lifecycle"]
+    Guards --> Gate["P4 durable completion gate"]
+    Gate --> Evals["P5 canonical trace and deterministic evaluation"]
+    Host -. "explicit MCP calls only" .-> Tools
+```
+
+| Phase | Result | Important boundary |
+|---|---|---|
+| P0 | Versioned project, goal, task, run, evidence, permission, and transition contracts | Public models and pure validation only |
+| P1 | Deterministic scheduling, Coordinator final-answer ownership, durable JSONL evidence, and strict replay | Library-only; it does not invoke a role |
+| P2 | SQLite claim, lease, heartbeat, retry, cancellation, idempotency, and write ownership | Caller explicitly initializes this authority after JSONL planning |
+| P3 | R0-R3 policy evaluation and durable R2 pause, decision, and one-time resume | `ExplicitOwner` is a caller assertion, not authentication |
+| P4 | Evidence-bound Reviewer/Auditor decisions block `completed` until required decisions resolve as `Pass` | Structural decision validation, not live semantic judgment |
+| P5 | Redacted canonical trace plus completeness, replay-parity, and contract-outcome graders | Library-only fixture evidence, not a hosted telemetry backend or production SLO |
+
+The rest of this guide explains the concrete workflows within those paths. The
+P0-P5 sequence is covered primarily by Workflow 11; Workflow 10 is the separate
+LangGraph-style orchestration library, and it is not automatically started or
+connected to the Goal Runtime.
+
 ## 4. Workflow index
 
 | Workflow | Runtime status | Primary result |
