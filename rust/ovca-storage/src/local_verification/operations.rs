@@ -784,7 +784,7 @@ fn require_complete_allocator_selection(
 
     for capability_id in capability_generation_ids(connection)?
         .into_iter()
-        .chain(current_capability_ids(connection)?.into_iter())
+        .chain(current_capability_ids(connection)?)
     {
         if !selected_capabilities.contains(capability_id.as_str()) {
             return Err(LocalVerificationStoreError::InvalidArchive(
@@ -794,7 +794,7 @@ fn require_complete_allocator_selection(
     }
     for key in bundle_generation_keys(connection)?
         .into_iter()
-        .chain(current_bundle_keys(connection)?.into_iter())
+        .chain(current_bundle_keys(connection)?)
     {
         if !selected_bundles.contains(&key) {
             return Err(LocalVerificationStoreError::InvalidArchive(
