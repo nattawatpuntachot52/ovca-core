@@ -30,6 +30,12 @@ use tempfile::{tempdir, TempDir};
 
 const RAW_SENTINEL: &str = "RAW_SECRET_SENTINEL_MUST_NOT_BE_SERIALIZED";
 
+fn executable_profile_tempdir() -> TempDir {
+    let current_executable = std::env::current_exe().unwrap();
+    let trusted_parent = current_executable.parent().unwrap();
+    tempfile::tempdir_in(trusted_parent).unwrap()
+}
+
 #[cfg(windows)]
 fn create_directory_redirect(target: &Path, link: &Path) -> io::Result<()> {
     std::os::windows::fs::symlink_dir(target, link)
@@ -694,7 +700,7 @@ fn timeout_terminates_the_contained_process_tree_before_publication() {
 
 #[test]
 fn later_executable_change_is_blocked_before_its_own_spawn() {
-    let executable_root = tempdir().unwrap();
+    let executable_root = executable_profile_tempdir();
     let later_executable = executable_root.path().join(if cfg!(windows) {
         "later-runner.exe"
     } else {
@@ -927,10 +933,10 @@ fn ads_and_short_name_alias_grammar_is_rejected_in_final_and_intermediate_compon
 #[cfg(windows)]
 #[test]
 fn stable_executable_ancestor_reparse_is_blocked_without_execution() {
-    let target_root = tempdir().unwrap();
+    let target_root = executable_profile_tempdir();
     let executable = target_root.path().join("runner.exe");
     fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
-    let profile_root = tempdir().unwrap();
+    let profile_root = executable_profile_tempdir();
     let redirect = profile_root.path().join("reviewed-bin");
     create_directory_redirect(target_root.path(), &redirect).unwrap();
     let marker = profile_root.path().join("ancestor-reparse-executed.txt");
