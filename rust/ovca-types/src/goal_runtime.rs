@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+pub mod local_verification;
+pub use local_verification::*;
+
 /// Current schema version for every top-level goal runtime contract.
 pub const GOAL_RUNTIME_CONTRACT_VERSION: ContractVersion = ContractVersion(1);
 

@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BehavioralAcceptanceContractV1",
+  "description": "Structural wire validation only. Schema success never admits evidence; every loaded value must pass the Rust BehavioralAcceptanceContract::validate semantic validator.",
+  "x-ovca-schema-role": "structural_wire_only",
+  "x-ovca-semantic-validator": "ovca_types::goal_runtime::local_verification::BehavioralAcceptanceContract::validate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "contract_id", "binding", "criteria"],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "contract_id": { "$ref": "#/$defs/stableId" },
+    "binding": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "goal_id", "task_id"],
+          "properties": {
+            "type": { "const": "bound" },
+            "goal_id": { "$ref": "#/$defs/stableId" },
+            "task_id": { "$ref": "#/$defs/stableId" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": { "const": "unbound" }
+          }
+        }
+      ]
+    },
+    "criteria": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["criterion_id", "order", "kind", "text", "required", "capability_ids"],
+        "properties": {
+          "criterion_id": { "$ref": "#/$defs/stableId" },
+          "order": { "type": "integer", "minimum": 0 },
+          "kind": {
+            "enum": ["acceptance", "verification", "definition_of_done"]
+          },
+          "text": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "required": { "type": "boolean" },
+          "capability_ids": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "$ref": "#/$defs/stableId" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*(?![\\s\\S])"
+    },
+    "sha256Digest": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
+    },
+    "logicalPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!.*[\\u0000-\\u001F\\u007F])(?!/)(?!.*\\\\)(?!.*:)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)[^/]+(?:/[^/]+)*(?![\\s\\S])"
+    }
+  }
+}

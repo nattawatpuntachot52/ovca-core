@@ -1,0 +1,46 @@
+{
+  "contract_version": 1,
+  "capability_id": "cap.core",
+  "revision": 1,
+  "criterion_ids": [
+    "criterion.accept.sample",
+    "criterion.dod.sample",
+    "criterion.verify.sample"
+  ],
+  "dependencies": [],
+  "changed_path_selectors": [
+    {
+      "kind": "exact",
+      "path": "rust/ovca-types/src/goal_runtime.rs"
+    },
+    {
+      "kind": "prefix",
+      "path": "rust/ovca-types/src/goal_runtime"
+    }
+  ],
+  "policy": {
+    "local_only": true,
+    "network": "denied",
+    "provider": "denied",
+    "telemetry": "denied",
+    "egress": "denied",
+    "external_evidence": "denied",
+    "external_storage": "denied",
+    "raw_shell": "forbidden",
+    "inherit_environment": false,
+    "fingerprint_algorithm": "sha256",
+    "allowed_executable_ids": ["cargo", "python"],
+    "allowed_environment_names": ["CARGO_TERM_COLOR", "RUST_BACKTRACE"]
+  },
+  "commands": [
+    {
+      "command_id": "command.ovca-types-test",
+      "executable_id": "cargo",
+      "argv": ["test", "--offline", "--locked", "--manifest-path", "rust/Cargo.toml", "-p", "ovca-types", "--lib", "local_verification"],
+      "cwd": {
+        "type": "snapshot_root"
+      },
+      "environment_names": ["CARGO_TERM_COLOR"]
+    }
+  ]
+}

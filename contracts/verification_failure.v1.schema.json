@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VerificationFailureV1",
+  "description": "Structural wire validation only. Schema success never admits evidence; every loaded value must pass the Rust VerificationFailure::validate semantic validator.",
+  "x-ovca-schema-role": "structural_wire_only",
+  "x-ovca-semantic-validator": "ovca_types::goal_runtime::local_verification::VerificationFailure::validate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "failure_id",
+    "category",
+    "confirmation",
+    "summary",
+    "recorded_at"
+  ],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "failure_id": { "$ref": "#/$defs/stableId" },
+    "category": {
+      "enum": [
+        "timeout",
+        "policy_block",
+        "contract_violation",
+        "source_drift",
+        "environment",
+        "infrastructure",
+        "test_failed_unclassified",
+        "product_bug",
+        "test_fragility"
+      ]
+    },
+    "confirmation": { "enum": ["provisional", "confirmed"] },
+    "supersedes_failure_id": { "$ref": "#/$defs/stableId" },
+    "criterion_id": { "$ref": "#/$defs/stableId" },
+    "summary": { "type": "string", "minLength": 1, "pattern": "\\S" },
+    "recorded_at": { "type": "string", "format": "date-time" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["category", "confirmation"],
+        "properties": {
+          "category": { "enum": ["product_bug", "test_fragility"] },
+          "confirmation": { "const": "confirmed" }
+        }
+      },
+      "then": { "required": ["supersedes_failure_id"] }
+    },
+    {
+      "if": {
+        "required": ["category", "confirmation"],
+        "properties": {
+          "category": { "enum": ["product_bug", "test_fragility"] },
+          "confirmation": { "const": "provisional" }
+        }
+      },
+      "then": { "not": { "required": ["supersedes_failure_id"] } }
+    }
+  ],
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*(?![\\s\\S])"
+    },
+    "sha256Digest": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
+    },
+    "logicalPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!.*[\\u0000-\\u001F\\u007F])(?!/)(?!.*\\\\)(?!.*:)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)[^/]+(?:/[^/]+)*(?![\\s\\S])"
+    }
+  }
+}

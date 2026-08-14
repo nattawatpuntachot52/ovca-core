@@ -1,0 +1,9 @@
+{
+  "contract_version": 1,
+  "failure_id": "failure.sample",
+  "category": "product_bug",
+  "confirmation": "provisional",
+  "criterion_id": "criterion.verify.sample",
+  "summary": "The deterministic product assertion failed",
+  "recorded_at": "2026-08-09T12:00:00Z"
+}

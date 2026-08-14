@@ -10,10 +10,10 @@ use ovca_runtime_core::{
 };
 use ovca_storage::RunEventLog;
 use ovca_types::{
-    ApprovalRequestId, ApprovalState, ContractVersion, GoalContract, GuardDenyReason, GuardRequest,
-    GuardRequestId, GuardSurface, IdempotencyKey, LeaseId, PermissionProfile, RetryBudget,
-    RiskTier, Role, RunEvent, RunEventPayload, RunId, SideEffectClass, Task, TaskId, TaskStatus,
-    TaskTerminalOutcome, WorkerId,
+    verification_sha256_hex, ApprovalRequestId, ApprovalState, ContractVersion, GoalContract,
+    GuardDenyReason, GuardRequest, GuardRequestId, GuardSurface, IdempotencyKey, LeaseId,
+    PermissionProfile, RetryBudget, RiskTier, Role, RunEvent, RunEventPayload, RunId,
+    SideEffectClass, Task, TaskId, TaskStatus, TaskTerminalOutcome, WorkerId,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -22,6 +22,8 @@ use std::fs;
 use tempfile::TempDir;
 
 const FIXTURE: &str = include_str!("fixtures/goal_runtime_p5_golden_cases.json");
+const FROZEN_FIXTURE_SHA256: &str =
+    "e669918d7add262321f359ed9dd76727ef82310b519271d913dd7a2f79d5dde3";
 
 #[derive(Debug, Deserialize)]
 struct GoldenFixture {
@@ -54,9 +56,15 @@ struct CaseInput {
 fn golden_goal_runtime_regression_cases_remain_deterministic() {
     let fixture: GoldenFixture = serde_json::from_str(FIXTURE).unwrap();
     assert_eq!(fixture.schema_version, 1);
-    assert!(
-        fixture.cases.len() >= 36,
-        "fixture must retain at least 36 cases"
+    assert_eq!(
+        fixture.cases.len(),
+        41,
+        "fixture must retain exactly 41 cases"
+    );
+    assert_eq!(
+        verification_sha256_hex(FIXTURE.as_bytes()),
+        FROZEN_FIXTURE_SHA256,
+        "fixture bytes, case identities, and expected results are immutable"
     );
 
     let ids = fixture

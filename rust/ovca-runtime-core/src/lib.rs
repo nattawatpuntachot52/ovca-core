@@ -13,6 +13,7 @@ pub mod durable_guardrails;
 pub mod execution_lifecycle;
 pub mod finalization;
 pub mod guardrails;
+pub mod local_verification_completion;
 pub mod replay;
 pub mod review_audit;
 pub mod scheduler;
@@ -30,6 +31,12 @@ pub use execution_lifecycle::{
 };
 pub use finalization::{FinalizationError, FinalizationKernel};
 pub use guardrails::{evaluate_guard_request, GuardEvaluationContext};
+pub use local_verification_completion::{
+    admit_local_verification_completion, completion_environment_names, completion_evidence_keys,
+    validate_local_verification_completion_contract, validate_persisted_completion_material,
+    LocalVerificationCompletionContract, LocalVerificationCompletionError,
+    LocalVerificationCompletionTask, LocalVerificationObservation, VerifiedCompletionMaterial,
+};
 pub use replay::{replay_run, validate_event_chain, ReplayError, ReplayedRun};
 pub use review_audit::{
     derive_review_audit_policy, evaluate_review_audit, validate_audit_decision,

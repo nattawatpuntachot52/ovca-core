@@ -2,8 +2,9 @@
 mod goal_runtime;
 
 pub use goal_runtime::{
-    build_planned_run, DurableGoalRuntime, DurableGoalRuntimeError, EventStamp,
-    ExecutionBootstrapResult, GoalRuntimeError, PlannedRunStamps, RuntimeView,
+    build_planned_run, DurableGoalRuntime, DurableGoalRuntimeError, EnforcedLocalVerificationGoal,
+    EventStamp, ExecutionBootstrapResult, GoalRuntimeError, LocalVerificationCompletionPolicy,
+    PlannedRunStamps, RuntimeView,
 };
 
 use anyhow::Result;

@@ -1,0 +1,316 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VerificationBundleV1",
+  "description": "Structural wire validation only. Schema success never admits evidence; every loaded value must pass the Rust VerificationBundle::validate semantic validator.",
+  "x-ovca-schema-role": "structural_wire_only",
+  "x-ovca-semantic-validator": "ovca_types::goal_runtime::local_verification::VerificationBundle::validate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "bundle_id",
+    "run_id",
+    "goal_id",
+    "task_id",
+    "behavior_contract_id",
+    "capability_ids",
+    "implementation_actor",
+    "verifier_actor",
+    "fingerprints",
+    "criterion_results",
+    "failures",
+    "verdict",
+    "created_at"
+  ],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "bundle_id": { "$ref": "#/$defs/stableId" },
+    "run_id": { "$ref": "#/$defs/stableId" },
+    "goal_id": { "$ref": "#/$defs/stableId" },
+    "task_id": { "$ref": "#/$defs/stableId" },
+    "behavior_contract_id": { "$ref": "#/$defs/stableId" },
+    "capability_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/stableId" }
+    },
+    "implementation_actor": { "$ref": "#/$defs/stableId" },
+    "verifier_actor": { "$ref": "#/$defs/stableId" },
+    "fingerprints": { "$ref": "#/$defs/verificationFingerprints" },
+    "criterion_results": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/criterionResult" }
+    },
+    "failures": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/verificationFailure" }
+    },
+    "verdict": { "enum": ["pass", "fail", "blocked", "timeout", "invalid"] },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["verdict"],
+        "properties": { "verdict": { "const": "pass" } }
+      },
+      "then": {
+        "properties": {
+          "criterion_results": {
+            "minItems": 1,
+            "items": {
+              "allOf": [
+                { "$ref": "#/$defs/criterionResult" },
+                {
+                  "type": "object",
+                  "properties": { "verdict": { "const": "pass" } }
+                }
+              ]
+            }
+          },
+          "failures": { "maxItems": 0 }
+        }
+      },
+      "else": {
+        "properties": {
+          "failures": { "minItems": 1 }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["verdict"],
+        "properties": { "verdict": { "const": "timeout" } }
+      },
+      "then": {
+        "properties": {
+          "failures": {
+            "contains": {
+              "type": "object",
+              "required": ["category"],
+              "properties": { "category": { "const": "timeout" } }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["verdict"],
+        "properties": { "verdict": { "const": "blocked" } }
+      },
+      "then": {
+        "properties": {
+          "failures": {
+            "contains": {
+              "type": "object",
+              "required": ["category"],
+              "properties": {
+                "category": {
+                  "enum": ["policy_block", "environment", "infrastructure"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["verdict"],
+        "properties": { "verdict": { "const": "invalid" } }
+      },
+      "then": {
+        "properties": {
+          "failures": {
+            "contains": {
+              "type": "object",
+              "required": ["category"],
+              "properties": {
+                "category": {
+                  "enum": ["contract_violation", "source_drift"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["verdict"],
+        "properties": { "verdict": { "const": "fail" } }
+      },
+      "then": {
+        "properties": {
+          "failures": {
+            "contains": {
+              "type": "object",
+              "required": ["category"],
+              "properties": {
+                "category": {
+                  "enum": [
+                    "test_failed_unclassified",
+                    "product_bug",
+                    "test_fragility",
+                    "environment",
+                    "infrastructure"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*(?![\\s\\S])"
+    },
+    "sha256Digest": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
+    },
+    "logicalPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!.*[\\u0000-\\u001F\\u007F])(?!/)(?!.*\\\\)(?!.*:)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)[^/]+(?:/[^/]+)*(?![\\s\\S])"
+    },
+    "verificationFingerprints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_pre",
+        "source_post",
+        "behavior_contract",
+        "capability_set",
+        "command",
+        "policy",
+        "environment"
+      ],
+      "properties": {
+        "source_pre": { "$ref": "#/$defs/sha256Digest" },
+        "source_post": { "$ref": "#/$defs/sha256Digest" },
+        "behavior_contract": { "$ref": "#/$defs/sha256Digest" },
+        "capability_set": { "$ref": "#/$defs/sha256Digest" },
+        "command": { "$ref": "#/$defs/sha256Digest" },
+        "policy": { "$ref": "#/$defs/sha256Digest" },
+        "environment": { "$ref": "#/$defs/sha256Digest" }
+      }
+    },
+    "criterionResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["criterion_id", "order", "kind", "text", "verdict"],
+      "properties": {
+        "criterion_id": { "$ref": "#/$defs/stableId" },
+        "order": { "type": "integer", "minimum": 0 },
+        "kind": {
+          "enum": ["acceptance", "verification", "definition_of_done"]
+        },
+        "text": { "type": "string", "minLength": 1, "pattern": "\\S" },
+        "verdict": { "enum": ["pass", "fail", "blocked", "timeout", "invalid"] }
+      }
+    },
+    "verificationFailure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "failure_id",
+        "category",
+        "confirmation",
+        "summary",
+        "recorded_at"
+      ],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "failure_id": { "$ref": "#/$defs/stableId" },
+        "category": {
+          "enum": [
+            "timeout",
+            "policy_block",
+            "contract_violation",
+            "source_drift",
+            "environment",
+            "infrastructure",
+            "test_failed_unclassified",
+            "product_bug",
+            "test_fragility"
+          ]
+        },
+        "confirmation": { "enum": ["provisional", "confirmed"] },
+        "supersedes_failure_id": { "$ref": "#/$defs/stableId" },
+        "criterion_id": { "$ref": "#/$defs/stableId" },
+        "summary": { "type": "string", "minLength": 1, "pattern": "\\S" },
+        "recorded_at": { "type": "string", "format": "date-time" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["category", "confirmation"],
+            "properties": {
+              "category": { "enum": ["product_bug", "test_fragility"] },
+              "confirmation": { "const": "confirmed" }
+            }
+          },
+          "then": { "required": ["supersedes_failure_id"] }
+        },
+        {
+          "if": {
+            "required": ["category", "confirmation"],
+            "properties": {
+              "category": { "enum": ["product_bug", "test_fragility"] },
+              "confirmation": { "const": "provisional" }
+            }
+          },
+          "then": { "not": { "required": ["supersedes_failure_id"] } }
+        }
+      ]
+    },
+    "currentBundleProof": {
+      "description": "V0 caller assertions only, never authoritative freshness and never direct completion admission. V4c must reread the CAS pointer and independently revalidate checksums, bindings, and fingerprints.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "bundle_digest",
+        "checksum_verified",
+        "integrity_verified",
+        "current_pointer_verified",
+        "current_pointer_digest",
+        "expected_run_id",
+        "expected_goal_id",
+        "expected_task_id",
+        "expected_behavior_contract_digest",
+        "expected_capability_set_digest",
+        "expected_command_digest",
+        "expected_policy_digest",
+        "expected_source_digest",
+        "expected_environment_digest"
+      ],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "bundle_digest": { "$ref": "#/$defs/sha256Digest" },
+        "checksum_verified": { "const": true },
+        "integrity_verified": { "const": true },
+        "current_pointer_verified": { "const": true },
+        "current_pointer_digest": { "$ref": "#/$defs/sha256Digest" },
+        "expected_run_id": { "$ref": "#/$defs/stableId" },
+        "expected_goal_id": { "$ref": "#/$defs/stableId" },
+        "expected_task_id": { "$ref": "#/$defs/stableId" },
+        "expected_behavior_contract_digest": { "$ref": "#/$defs/sha256Digest" },
+        "expected_capability_set_digest": { "$ref": "#/$defs/sha256Digest" },
+        "expected_command_digest": { "$ref": "#/$defs/sha256Digest" },
+        "expected_policy_digest": { "$ref": "#/$defs/sha256Digest" },
+        "expected_source_digest": { "$ref": "#/$defs/sha256Digest" },
+        "expected_environment_digest": { "$ref": "#/$defs/sha256Digest" }
+      }
+    }
+  }
+}

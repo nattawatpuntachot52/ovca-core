@@ -4,20 +4,26 @@ use ovca_observability::{
     GoalRuntimeEvaluationError,
 };
 use ovca_runtime_core::{
-    replay_run, schedule_tasks, DurableApprovalError, DurableApprovalEvaluation,
+    admit_local_verification_completion, completion_environment_names, completion_evidence_keys,
+    replay_run, schedule_tasks, validate_local_verification_completion_contract,
+    validate_persisted_completion_material, DurableApprovalError, DurableApprovalEvaluation,
     DurableApprovalRecord, DurableDecisionResult, DurableExecutionAuthority, DurableExecutionError,
     DurableGuardrailAuthority, GuardEvaluationContext, GuardedExecution, InitializeRunResult,
-    LoadedExecutionRun, ReplayError, ReplayedRun, ScheduleError, DEFAULT_APPROVAL_CAS_RETRY_LIMIT,
+    LoadedExecutionRun, LocalVerificationCompletionContract, LocalVerificationCompletionError,
+    LocalVerificationObservation, ReplayError, ReplayedRun, ScheduleError,
+    VerifiedCompletionMaterial, DEFAULT_APPROVAL_CAS_RETRY_LIMIT,
 };
-use ovca_storage::{RunEventLog, RunEventLogError};
+use ovca_storage::{EvidenceBank, LocalVerificationStoreError, RunEventLog, RunEventLogError};
 use ovca_types::{
-    ApprovalDecisionRecord, ApprovalRequestId, ContractVersion, EventId, ExecutionPlan,
-    GoalContract, GoalId, GuardRequest, RetryBudget, Role, RunEvent, RunEventPayload, RunId,
-    RunStatus, Task, TaskId, TaskStatus,
+    ApprovalDecisionRecord, ApprovalRequestId, CompletionAppendReconciliation, ContractVersion,
+    EventId, ExecutionPlan, GoalContract, GoalId, GuardRequest, RetryBudget, Role, RunEvent,
+    RunEventPayload, RunId, RunStatus, Task, TaskId, TaskStatus,
 };
+use ovca_verifier::execution::EnvironmentBindings;
+use ovca_verifier::snapshot::{FrozenSnapshot, SnapshotError, SourceManifest};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventStamp {
@@ -197,6 +203,41 @@ pub enum DurableGoalRuntimeError {
     Guard {
         source: DurableApprovalError,
     },
+    LocalVerificationStorage {
+        source: LocalVerificationStoreError,
+    },
+    LocalVerificationAdmission {
+        source: LocalVerificationCompletionError,
+    },
+    LocalVerificationSnapshot {
+        source: SnapshotError,
+    },
+    LocalVerificationTemporarySnapshot,
+    InvalidCompletionPolicy {
+        detail: String,
+    },
+    CompletionPolicyMissing {
+        goal_id: GoalId,
+    },
+    CompletionGoalContractMismatch {
+        goal_id: GoalId,
+    },
+    CompletionTaskSetMismatch {
+        goal_id: GoalId,
+    },
+    VerifiedCompletionRequired {
+        goal_id: GoalId,
+    },
+    VerifiedCompletionNotRequired {
+        goal_id: GoalId,
+    },
+    InvalidVerifiedCompletionEvent,
+    CompletionAppendEventConflict {
+        event_id: EventId,
+    },
+    CompletionEnvironmentUnavailable {
+        task_id: TaskId,
+    },
     BootstrapRunStatusMismatch {
         expected: RunStatus,
         found: RunStatus,
@@ -247,6 +288,50 @@ impl fmt::Display for DurableGoalRuntimeError {
             Self::RunNotFound { run_id } => write!(formatter, "run {run_id} was not found"),
             Self::Execution { source } => write!(formatter, "execution authority failed: {source}"),
             Self::Guard { source } => write!(formatter, "guard authority failed: {source}"),
+            Self::LocalVerificationStorage { source } => {
+                write!(formatter, "local-verification storage failed: {source}")
+            }
+            Self::LocalVerificationAdmission { source } => {
+                write!(formatter, "local-verification admission failed: {source}")
+            }
+            Self::LocalVerificationSnapshot { source } => {
+                write!(formatter, "local-verification source observation failed: {source}")
+            }
+            Self::LocalVerificationTemporarySnapshot => formatter
+                .write_str("failed to create a private local-verification snapshot witness"),
+            Self::InvalidCompletionPolicy { detail } => {
+                write!(formatter, "invalid local-verification completion policy: {detail}")
+            }
+            Self::CompletionPolicyMissing { goal_id } => {
+                write!(formatter, "completion policy is missing for persisted goal {goal_id}")
+            }
+            Self::CompletionGoalContractMismatch { goal_id } => write!(
+                formatter,
+                "caller goal contract differs from authoritative completion policy for {goal_id}"
+            ),
+            Self::CompletionTaskSetMismatch { goal_id } => write!(
+                formatter,
+                "persisted run task set differs from authoritative completion policy for {goal_id}"
+            ),
+            Self::VerifiedCompletionRequired { goal_id } => write!(
+                formatter,
+                "goal {goal_id} requires verifier-backed completion"
+            ),
+            Self::VerifiedCompletionNotRequired { goal_id } => write!(
+                formatter,
+                "goal {goal_id} does not require verifier-backed completion"
+            ),
+            Self::InvalidVerifiedCompletionEvent => formatter.write_str(
+                "verified completion accepts only a final StatusTransition into Completed",
+            ),
+            Self::CompletionAppendEventConflict { event_id } => write!(
+                formatter,
+                "durable completion event identity {event_id} has conflicting bytes"
+            ),
+            Self::CompletionEnvironmentUnavailable { task_id } => write!(
+                formatter,
+                "declared environment bindings are unavailable for completion task {task_id}"
+            ),
             Self::BootstrapRunStatusMismatch { expected, found } => write!(
                 formatter,
                 "execution bootstrap requires orchestration status {expected}, found {found}"
@@ -293,6 +378,9 @@ impl std::error::Error for DurableGoalRuntimeError {
             Self::Evaluation { source } => Some(source),
             Self::Execution { source } => Some(source),
             Self::Guard { source } => Some(source),
+            Self::LocalVerificationStorage { source } => Some(source),
+            Self::LocalVerificationAdmission { source } => Some(source),
+            Self::LocalVerificationSnapshot { source } => Some(source),
             Self::RunAlreadyExists { .. }
             | Self::RunNotFound { .. }
             | Self::BootstrapRunStatusMismatch { .. }
@@ -302,7 +390,17 @@ impl std::error::Error for DurableGoalRuntimeError {
             | Self::BootstrapPlanMismatch { .. }
             | Self::ViewRunMismatch { .. }
             | Self::ViewGoalMismatch { .. }
-            | Self::ViewTaskSetMismatch { .. } => None,
+            | Self::ViewTaskSetMismatch { .. }
+            | Self::LocalVerificationTemporarySnapshot
+            | Self::InvalidCompletionPolicy { .. }
+            | Self::CompletionPolicyMissing { .. }
+            | Self::CompletionGoalContractMismatch { .. }
+            | Self::CompletionTaskSetMismatch { .. }
+            | Self::VerifiedCompletionRequired { .. }
+            | Self::VerifiedCompletionNotRequired { .. }
+            | Self::InvalidVerifiedCompletionEvent
+            | Self::CompletionAppendEventConflict { .. }
+            | Self::CompletionEnvironmentUnavailable { .. } => None,
         }
     }
 }
@@ -311,6 +409,110 @@ impl From<RunEventLogError> for DurableGoalRuntimeError {
     fn from(source: RunEventLogError) -> Self {
         Self::Storage { source }
     }
+}
+
+impl From<LocalVerificationStoreError> for DurableGoalRuntimeError {
+    fn from(source: LocalVerificationStoreError) -> Self {
+        Self::LocalVerificationStorage { source }
+    }
+}
+
+impl From<LocalVerificationCompletionError> for DurableGoalRuntimeError {
+    fn from(source: LocalVerificationCompletionError) -> Self {
+        Self::LocalVerificationAdmission { source }
+    }
+}
+
+impl From<SnapshotError> for DurableGoalRuntimeError {
+    fn from(source: SnapshotError) -> Self {
+        Self::LocalVerificationSnapshot { source }
+    }
+}
+
+/// Owner-bound inputs for one verifier-enforced goal.
+#[derive(Clone)]
+pub struct EnforcedLocalVerificationGoal {
+    pub completion: LocalVerificationCompletionContract,
+    pub source_manifest: SourceManifest,
+    pub source_root: PathBuf,
+    pub environment_bindings: EnvironmentBindings,
+}
+
+impl fmt::Debug for EnforcedLocalVerificationGoal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EnforcedLocalVerificationGoal")
+            .field("goal_id", &self.completion.goal.id)
+            .field("task_count", &self.completion.task_ids.len())
+            .field("source_file_count", &self.source_manifest.files.len())
+            .field("source_root", &"[redacted]")
+            .field("environment_bindings", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Closed completion enforcement selector. It is never inferred from the host
+/// environment, a shadow report, a handoff claim, or a per-event boolean.
+#[derive(Clone)]
+pub enum LocalVerificationCompletionPolicy {
+    Disabled,
+    Enforced {
+        goals: BTreeMap<GoalId, EnforcedLocalVerificationGoal>,
+    },
+}
+
+impl fmt::Debug for LocalVerificationCompletionPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Disabled => formatter.write_str("Disabled"),
+            Self::Enforced { goals } => formatter
+                .debug_struct("Enforced")
+                .field("goal_ids", &goals.keys().collect::<Vec<_>>())
+                .finish(),
+        }
+    }
+}
+
+fn validate_completion_policy(
+    policy: &LocalVerificationCompletionPolicy,
+) -> Result<(), DurableGoalRuntimeError> {
+    let LocalVerificationCompletionPolicy::Enforced { goals } = policy else {
+        return Ok(());
+    };
+    if goals.is_empty() {
+        return Err(DurableGoalRuntimeError::InvalidCompletionPolicy {
+            detail: "enforced policy requires at least one authoritative goal".to_owned(),
+        });
+    }
+    for (goal_id, authority) in goals {
+        if goal_id != &authority.completion.goal.id {
+            return Err(DurableGoalRuntimeError::InvalidCompletionPolicy {
+                detail: format!("goal map key {goal_id} differs from the stored contract"),
+            });
+        }
+        validate_local_verification_completion_contract(&authority.completion)?;
+        authority.source_manifest.validate()?;
+        if !is_local_absolute_source_root(&authority.source_root) {
+            return Err(DurableGoalRuntimeError::InvalidCompletionPolicy {
+                detail: format!(
+                    "source root for {goal_id} must be an absolute local filesystem path"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn is_local_absolute_source_root(root: &Path) -> bool {
+    if !root.is_absolute() {
+        return false;
+    }
+    let text = root.as_os_str().to_string_lossy();
+    let lower = text.to_ascii_lowercase();
+    !text.starts_with("\\\\")
+        && !text.starts_with("//")
+        && !lower.starts_with("file:")
+        && !lower.contains("://")
 }
 
 /// Durable orchestration, execution, and guardrail wrapper for validated goal runs.
@@ -328,6 +530,8 @@ pub struct DurableGoalRuntime {
     log: RunEventLog,
     execution: DurableExecutionAuthority,
     guardrails: DurableGuardrailAuthority,
+    completion_policy: LocalVerificationCompletionPolicy,
+    evidence_bank: Option<EvidenceBank>,
 }
 
 impl DurableGoalRuntime {
@@ -339,7 +543,34 @@ impl DurableGoalRuntime {
             log: RunEventLog::new(root),
             execution: DurableExecutionAuthority::new(root),
             guardrails: DurableGuardrailAuthority::new(root, DEFAULT_APPROVAL_CAS_RETRY_LIMIT),
+            completion_policy: LocalVerificationCompletionPolicy::Disabled,
+            evidence_bank: None,
         }
+    }
+
+    /// Creates a runtime with an explicit closed completion policy.
+    ///
+    /// Construction remains side-effect free. An enforced runtime binds its
+    /// EvidenceBank to the same caller-provided durable root as the event log.
+    pub fn try_new_with_completion_policy(
+        root: impl AsRef<Path>,
+        completion_policy: LocalVerificationCompletionPolicy,
+    ) -> Result<Self, DurableGoalRuntimeError> {
+        validate_completion_policy(&completion_policy)?;
+        let root = root.as_ref();
+        let evidence_bank = match &completion_policy {
+            LocalVerificationCompletionPolicy::Disabled => None,
+            LocalVerificationCompletionPolicy::Enforced { .. } => {
+                Some(EvidenceBank::try_new(root)?)
+            }
+        };
+        Ok(Self {
+            log: RunEventLog::new(root),
+            execution: DurableExecutionAuthority::new(root),
+            guardrails: DurableGuardrailAuthority::new(root, DEFAULT_APPROVAL_CAS_RETRY_LIMIT),
+            completion_policy,
+            evidence_bank,
+        })
     }
 
     /// Returns the fixed JSONL path used by this runtime.
@@ -549,6 +780,271 @@ impl DurableGoalRuntime {
         validate_runtime_view(orchestration, execution)
     }
 
+    fn authoritative_completion_goal<'a>(
+        &'a self,
+        events: &[RunEvent],
+        caller_goal: &GoalContract,
+    ) -> Result<Option<&'a EnforcedLocalVerificationGoal>, DurableGoalRuntimeError> {
+        let LocalVerificationCompletionPolicy::Enforced { goals } = &self.completion_policy else {
+            return Ok(None);
+        };
+        let (goal_id, persisted_task_ids) = match events.first().map(|event| &event.payload) {
+            Some(RunEventPayload::RunCreated {
+                goal_id, task_ids, ..
+            }) => (goal_id, task_ids),
+            _ => {
+                // Preserve the canonical replay error for malformed or missing
+                // run creation. A completed stream cannot be replayed unbound,
+                // so its closed identity is resolved from the creation event and
+                // every caller performs the full authoritative replay next.
+                replay_run(events, None)
+                    .map_err(|source| DurableGoalRuntimeError::Replay { source })?;
+                unreachable!("successful replay requires a run-created event")
+            }
+        };
+        let authority =
+            goals
+                .get(goal_id)
+                .ok_or_else(|| DurableGoalRuntimeError::CompletionPolicyMissing {
+                    goal_id: goal_id.clone(),
+                })?;
+        if &authority.completion.goal != caller_goal {
+            return Err(DurableGoalRuntimeError::CompletionGoalContractMismatch {
+                goal_id: goal_id.clone(),
+            });
+        }
+        if persisted_task_ids != &authority.completion.task_ids {
+            return Err(DurableGoalRuntimeError::CompletionTaskSetMismatch {
+                goal_id: goal_id.clone(),
+            });
+        }
+        Ok(Some(authority))
+    }
+
+    fn fresh_completion_material(
+        &self,
+        authority: &EnforcedLocalVerificationGoal,
+        run_id: &RunId,
+        declared_task_ids: &[TaskId],
+        snapshot: &ovca_storage::CompletionAdmissionSnapshot,
+    ) -> Result<VerifiedCompletionMaterial, DurableGoalRuntimeError> {
+        let snapshot_root = tempfile::tempdir()
+            .map_err(|_| DurableGoalRuntimeError::LocalVerificationTemporarySnapshot)?;
+        let frozen = FrozenSnapshot::materialize(
+            &authority.source_root,
+            snapshot_root.path(),
+            &authority.source_manifest,
+        )?;
+        let source_pre_digest = frozen.source_pre_fingerprint().to_owned();
+        let source_post_digest = frozen.source_post_fingerprint()?;
+
+        let mut observations = Vec::with_capacity(authority.completion.tasks.len());
+        for task in &authority.completion.tasks {
+            let environment_names = completion_environment_names(task)?;
+            let environment_digest = authority
+                .environment_bindings
+                .digest_for(&environment_names)
+                .ok_or_else(
+                    || DurableGoalRuntimeError::CompletionEnvironmentUnavailable {
+                        task_id: task.selection.task_id.clone(),
+                    },
+                )?;
+            observations.push(LocalVerificationObservation {
+                task_id: task.selection.task_id.clone(),
+                source_pre_digest: source_pre_digest.clone(),
+                source_post_digest: source_post_digest.clone(),
+                environment_digest,
+            });
+        }
+
+        admit_local_verification_completion(
+            &authority.completion,
+            run_id,
+            declared_task_ids,
+            snapshot,
+            &observations,
+        )
+        .map_err(Into::into)
+    }
+
+    /// Prepares authoritative evidence material without appending any event.
+    ///
+    /// The result is intentionally provisional: final completion always opens a
+    /// fresh EvidenceBank lease and recomputes all live observations again.
+    pub fn prepare_local_verification_completion(
+        &self,
+        run_id: &RunId,
+        goal: &GoalContract,
+    ) -> Result<VerifiedCompletionMaterial, DurableGoalRuntimeError> {
+        validate_goal_contract_versions(goal)
+            .map_err(|source| DurableGoalRuntimeError::Build { source })?;
+        let events = self.log.load_run(run_id)?;
+        if events.is_empty() {
+            return Err(DurableGoalRuntimeError::RunNotFound {
+                run_id: run_id.clone(),
+            });
+        }
+        let authority = self
+            .authoritative_completion_goal(&events, goal)?
+            .ok_or_else(|| DurableGoalRuntimeError::VerifiedCompletionNotRequired {
+                goal_id: goal.id.clone(),
+            })?;
+        if !requires_local_verification(&authority.completion.goal) {
+            return Err(DurableGoalRuntimeError::VerifiedCompletionNotRequired {
+                goal_id: authority.completion.goal.id.clone(),
+            });
+        }
+        let keys = completion_evidence_keys(&authority.completion, run_id)?;
+        let evidence_bank = self.evidence_bank.as_ref().ok_or_else(|| {
+            DurableGoalRuntimeError::CompletionPolicyMissing {
+                goal_id: authority.completion.goal.id.clone(),
+            }
+        })?;
+        evidence_bank.with_completion_admission_lease(&keys, |snapshot| {
+            let current_events = self.log.load_run(run_id)?;
+            let current_authority = self
+                .authoritative_completion_goal(&current_events, goal)?
+                .ok_or_else(|| DurableGoalRuntimeError::VerifiedCompletionNotRequired {
+                    goal_id: goal.id.clone(),
+                })?;
+            let replayed = replay_run(&current_events, Some(&current_authority.completion.goal))
+                .map_err(|source| DurableGoalRuntimeError::Replay { source })?;
+            self.fresh_completion_material(
+                current_authority,
+                run_id,
+                &replayed.run_record.task_ids,
+                snapshot,
+            )
+        })
+    }
+
+    /// Revalidates current local evidence and appends only a final synced
+    /// `StatusTransition` into `Completed` while the EvidenceBank writer
+    /// reservation remains held.
+    ///
+    /// SQLite and JSONL are not one atomic transaction. A return error after
+    /// the JSONL `sync_all` boundary can therefore be ambiguous; V5 recovery
+    /// must reload/replay and check the exact event ID before any retry.
+    pub fn append_verified_completion(
+        &self,
+        event: RunEvent,
+        goal: &GoalContract,
+    ) -> Result<ReplayedRun, DurableGoalRuntimeError> {
+        if !is_completed_transition(&event.payload) {
+            return Err(DurableGoalRuntimeError::InvalidVerifiedCompletionEvent);
+        }
+        validate_goal_contract_versions(goal)
+            .map_err(|source| DurableGoalRuntimeError::Build { source })?;
+        let run_id = event.run_id.clone();
+        let events = self.log.load_run(&run_id)?;
+        if events.is_empty() {
+            return Err(DurableGoalRuntimeError::RunNotFound { run_id });
+        }
+        let authority = self
+            .authoritative_completion_goal(&events, goal)?
+            .ok_or_else(|| DurableGoalRuntimeError::VerifiedCompletionNotRequired {
+                goal_id: goal.id.clone(),
+            })?;
+        if !requires_local_verification(&authority.completion.goal) {
+            return Err(DurableGoalRuntimeError::VerifiedCompletionNotRequired {
+                goal_id: authority.completion.goal.id.clone(),
+            });
+        }
+        let keys = completion_evidence_keys(&authority.completion, &event.run_id)?;
+        let evidence_bank = self.evidence_bank.as_ref().ok_or_else(|| {
+            DurableGoalRuntimeError::CompletionPolicyMissing {
+                goal_id: authority.completion.goal.id.clone(),
+            }
+        })?;
+
+        evidence_bank.with_completion_admission_lease(&keys, |snapshot| {
+            let mut current_events = self.log.load_run(&event.run_id)?;
+            if current_events.is_empty() {
+                return Err(DurableGoalRuntimeError::RunNotFound {
+                    run_id: event.run_id.clone(),
+                });
+            }
+            let current_authority = self
+                .authoritative_completion_goal(&current_events, goal)?
+                .ok_or_else(|| DurableGoalRuntimeError::VerifiedCompletionNotRequired {
+                    goal_id: goal.id.clone(),
+                })?;
+            let current = replay_run(&current_events, Some(&current_authority.completion.goal))
+                .map_err(|source| DurableGoalRuntimeError::Replay { source })?;
+            let material = self.fresh_completion_material(
+                current_authority,
+                &event.run_id,
+                &current.run_record.task_ids,
+                snapshot,
+            )?;
+            validate_persisted_completion_material(
+                &material,
+                &current.evidence_references,
+                current.completion_evidence.as_ref(),
+            )?;
+
+            current_events.push(event.clone());
+            replay_run(&current_events, Some(&current_authority.completion.goal))
+                .map_err(|source| DurableGoalRuntimeError::Replay { source })?;
+            self.log.append(&event)?;
+            Ok(())
+        })?;
+
+        self.load_run(&event.run_id, goal)
+    }
+
+    /// Reconciles an ambiguous completion append without appending or retrying.
+    ///
+    /// The durable JSONL is reloaded and strictly replayed first. An exact event
+    /// already present is `AlreadyCommitted`. A valid absent event is
+    /// `RetryRequired`, leaving the retry decision to the caller. Reused event
+    /// identities with different bytes, alternate sequence/previous-event links,
+    /// malformed JSONL, and conflicting completion state all fail closed.
+    pub fn reconcile_verified_completion_append(
+        &self,
+        event: &RunEvent,
+        goal: &GoalContract,
+    ) -> Result<CompletionAppendReconciliation, DurableGoalRuntimeError> {
+        if !is_completed_transition(&event.payload) {
+            return Err(DurableGoalRuntimeError::InvalidVerifiedCompletionEvent);
+        }
+        validate_goal_contract_versions(goal)
+            .map_err(|source| DurableGoalRuntimeError::Build { source })?;
+        let events = self.log.load_run(&event.run_id)?;
+        if events.is_empty() {
+            return Err(DurableGoalRuntimeError::RunNotFound {
+                run_id: event.run_id.clone(),
+            });
+        }
+        let authority = self
+            .authoritative_completion_goal(&events, goal)?
+            .ok_or_else(|| DurableGoalRuntimeError::VerifiedCompletionNotRequired {
+                goal_id: goal.id.clone(),
+            })?;
+        if !requires_local_verification(&authority.completion.goal) {
+            return Err(DurableGoalRuntimeError::VerifiedCompletionNotRequired {
+                goal_id: authority.completion.goal.id.clone(),
+            });
+        }
+        replay_run(&events, Some(&authority.completion.goal))
+            .map_err(|source| DurableGoalRuntimeError::Replay { source })?;
+
+        if let Some(committed) = events.iter().find(|value| value.id == event.id) {
+            if committed == event {
+                return Ok(CompletionAppendReconciliation::AlreadyCommitted);
+            }
+            return Err(DurableGoalRuntimeError::CompletionAppendEventConflict {
+                event_id: event.id.clone(),
+            });
+        }
+
+        let mut prospective = events;
+        prospective.push(event.clone());
+        replay_run(&prospective, Some(&authority.completion.goal))
+            .map_err(|source| DurableGoalRuntimeError::Replay { source })?;
+        Ok(CompletionAppendReconciliation::RetryRequired)
+    }
+
     /// Prospectively validates a caller-supplied complete event before
     /// persisting it, then strictly reloads and replays the run.
     ///
@@ -566,6 +1062,16 @@ impl DurableGoalRuntime {
         let mut prospective = self.log.load_run(&run_id)?;
         if prospective.is_empty() {
             return Err(DurableGoalRuntimeError::RunNotFound { run_id });
+        }
+
+        if is_completed_transition(&event.payload) {
+            if let Some(authority) = self.authoritative_completion_goal(&prospective, goal)? {
+                if requires_local_verification(&authority.completion.goal) {
+                    return Err(DurableGoalRuntimeError::VerifiedCompletionRequired {
+                        goal_id: authority.completion.goal.id.clone(),
+                    });
+                }
+            }
         }
 
         prospective.push(event.clone());
@@ -615,6 +1121,22 @@ impl DurableGoalRuntime {
         evaluate_goal_runtime(&persisted_events, &reloaded_events, goal)
             .map_err(|source| DurableGoalRuntimeError::Evaluation { source })
     }
+}
+
+fn is_completed_transition(payload: &RunEventPayload) -> bool {
+    matches!(
+        payload,
+        RunEventPayload::StatusTransition {
+            to: RunStatus::Completed,
+            ..
+        }
+    )
+}
+
+fn requires_local_verification(goal: &GoalContract) -> bool {
+    goal.completion_precondition
+        .require_all_verification_criteria
+        && !goal.verification_criteria.is_empty()
 }
 
 fn validate_execution_bootstrap(
@@ -911,16 +1433,33 @@ mod tests {
     use chrono::TimeZone;
     use ovca_observability::GoalRuntimeEvaluationOutcome;
     use ovca_runtime_core::ClaimRequest;
-    use ovca_storage::VERSIONED_STATE_DB_RELATIVE_PATH;
+    use ovca_storage::{
+        AuthoritativeProjectionSelection, CasOutcome, EvidenceKey, LocalVerificationStore,
+        ProjectionExpectation, ProjectionRebuildIntent, PublishOutcome, StaleCause,
+        VERSIONED_STATE_DB_RELATIVE_PATH,
+    };
+    use ovca_types::{
+        select_targeted_rerun, verification_behavior_digest, verification_capability_set_digest,
+        verification_command_set_digest, verification_policy_digest, verification_sha256_hex,
+    };
     use ovca_types::{
         ApprovalAuthority, ApprovalDisposition, ApprovalState, AuditDecision, AuditDecisionId,
-        CompletionEvidence, CompletionPrecondition, CoordinatorFinalResponse, CriterionAssessment,
-        CriterionAssessmentVerdict, CriterionKind, EvidenceId, EvidenceKind, EvidenceRef,
-        ExecutionMode, GuardDenyReason, GuardRequestId, GuardRequirement, GuardSurface, LeaseId,
+        BehaviorBinding, BehaviorCriterion, BehaviorKind, BehavioralAcceptanceContract,
+        CapabilityDefinition, ChangedPathEntry, ChangedPathKind, ChangedPathManifest,
+        ChangedPathSelector, CompletionEvidence, CompletionPrecondition, CoordinatorFinalResponse,
+        CriterionAssessment, CriterionAssessmentVerdict, CriterionKind, CriterionResult,
+        CriterionResultVerdict, DeniedAccess, DigestAlgorithm, EvidenceId, EvidenceKind,
+        EvidenceRef, ExecutionMode, FailureConfirmation, GuardDenyReason, GuardRequestId,
+        GuardRequirement, GuardSurface, LeaseId, LocalMachinePolicy, PathSelectorKind,
         PermissionProfile, ProjectId, ReviewAuditRequirements, ReviewAuditResolution,
-        ReviewDecision, ReviewDecisionId, ReviewVerdict, RiskTier, RunGuardDecision,
-        SideEffectClass, SpecialistOutput, WorkerId,
+        ReviewDecision, ReviewDecisionId, ReviewVerdict, RiskTier, RunGuardDecision, ShellPolicy,
+        SideEffectClass, SpecialistOutput, TargetedRerunOutcome, TargetedRerunRequest,
+        UnknownPathPolicy, VerificationBundle, VerificationCommand, VerificationFailure,
+        VerificationFailureCategory, VerificationFingerprints, VerificationVerdict, WorkerId,
+        WorkingDirectory, LOCAL_VERIFICATION_CONTRACT_VERSION,
     };
+    use ovca_verifier::snapshot::SourceFile;
+    use std::ffi::OsString;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -1034,6 +1573,323 @@ mod tests {
             ),
             goal,
         )
+    }
+
+    struct V4cFixture {
+        _durable: TempDir,
+        _source: TempDir,
+        runtime: DurableGoalRuntime,
+        goal: GoalContract,
+    }
+
+    const V4C_ENVIRONMENT_NAME: &str = "OVCA_V4C_TEST_BINDING";
+    const V4C_ENVIRONMENT_VALUE: &str = "v4c-environment-value-must-not-be-serialized";
+
+    fn inserted<T>(outcome: PublishOutcome<T>) -> T {
+        match outcome {
+            PublishOutcome::Inserted(value) | PublishOutcome::ExistingIdentical(value) => value,
+        }
+    }
+
+    fn v4c_fixture() -> V4cFixture {
+        let durable = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+        let source_bytes = b"verified completion source\n";
+        fs::write(source.path().join("input.txt"), source_bytes).unwrap();
+        let source_manifest = SourceManifest {
+            files: vec![SourceFile {
+                logical_path: "input.txt".to_owned(),
+                sha256: verification_sha256_hex(source_bytes),
+            }],
+        };
+        let source_fingerprint = source_manifest.fingerprint().unwrap();
+
+        let mut goal = goal();
+        goal.objective = "complete from current local verification only".to_owned();
+        goal.verification_criteria = vec!["verified".to_owned(), "verified second".to_owned()];
+        goal.completion_precondition = CompletionPrecondition {
+            contract_version: ContractVersion::current(),
+            minimum_evidence_refs: 1,
+            require_all_acceptance_criteria: true,
+            require_all_verification_criteria: true,
+        };
+
+        let capability = CapabilityDefinition {
+            contract_version: LOCAL_VERIFICATION_CONTRACT_VERSION,
+            capability_id: "capability.v4c".to_owned(),
+            revision: 1,
+            criterion_ids: vec![
+                "criterion.verify".to_owned(),
+                "criterion.verify.second".to_owned(),
+            ],
+            dependencies: Vec::new(),
+            changed_path_selectors: vec![ChangedPathSelector {
+                kind: PathSelectorKind::Exact,
+                path: "input.txt".to_owned(),
+            }],
+            policy: LocalMachinePolicy {
+                local_only: true,
+                network: DeniedAccess::Denied,
+                provider: DeniedAccess::Denied,
+                telemetry: DeniedAccess::Denied,
+                egress: DeniedAccess::Denied,
+                external_evidence: DeniedAccess::Denied,
+                external_storage: DeniedAccess::Denied,
+                raw_shell: ShellPolicy::Forbidden,
+                inherit_environment: false,
+                fingerprint_algorithm: DigestAlgorithm::Sha256,
+                allowed_executable_ids: BTreeSet::from(["cargo".to_owned()]),
+                allowed_environment_names: BTreeSet::from([V4C_ENVIRONMENT_NAME.to_owned()]),
+            },
+            commands: vec![VerificationCommand {
+                command_id: "command.v4c".to_owned(),
+                executable_id: "cargo".to_owned(),
+                argv: vec!["test".to_owned()],
+                cwd: WorkingDirectory::SnapshotRoot,
+                environment_names: BTreeSet::from([V4C_ENVIRONMENT_NAME.to_owned()]),
+            }],
+        };
+        let behavior = BehavioralAcceptanceContract {
+            contract_version: LOCAL_VERIFICATION_CONTRACT_VERSION,
+            contract_id: "behavior.v4c".to_owned(),
+            binding: BehaviorBinding::Bound {
+                goal_id: goal.id.clone(),
+                task_id: TaskId::from("task-a"),
+            },
+            criteria: vec![
+                BehaviorCriterion {
+                    criterion_id: "criterion.verify".to_owned(),
+                    order: 0,
+                    kind: BehaviorKind::Verification,
+                    text: "verified".to_owned(),
+                    required: true,
+                    capability_ids: vec![capability.capability_id.clone()],
+                },
+                BehaviorCriterion {
+                    criterion_id: "criterion.verify.second".to_owned(),
+                    order: 1,
+                    kind: BehaviorKind::Verification,
+                    text: "verified second".to_owned(),
+                    required: true,
+                    capability_ids: vec![capability.capability_id.clone()],
+                },
+            ],
+        };
+
+        let store = LocalVerificationStore::try_new(durable.path()).unwrap();
+        let registry = store.capability_registry();
+        let capability_record = inserted(registry.publish(&capability).unwrap());
+        registry
+            .compare_and_swap_current(
+                &capability.capability_id,
+                capability.revision,
+                &capability_record.digest,
+                &ProjectionExpectation::Absent,
+            )
+            .unwrap();
+        let registry_snapshot = registry.load_current_snapshot().unwrap();
+        let policy_digest = verification_policy_digest(std::slice::from_ref(&capability)).unwrap();
+        let selection_request = TargetedRerunRequest {
+            contract_version: LOCAL_VERIFICATION_CONTRACT_VERSION,
+            run_id: RunId::from("run-1"),
+            goal_id: goal.id.clone(),
+            task_id: TaskId::from("task-a"),
+            source_fingerprint: source_fingerprint.clone(),
+            policy_digest: policy_digest.clone(),
+            changed_paths: ChangedPathManifest {
+                entries: vec![ChangedPathEntry {
+                    kind: ChangedPathKind::Modified,
+                    path: "input.txt".to_owned(),
+                    previous_path: None,
+                }],
+            },
+            unknown_path_policy: UnknownPathPolicy::Blocked,
+        };
+        let selection = match select_targeted_rerun(&selection_request, &registry_snapshot) {
+            TargetedRerunOutcome::Selected { selection } => *selection,
+            other => panic!("unexpected selection: {other:?}"),
+        };
+        let environment_bindings = EnvironmentBindings {
+            values: BTreeMap::from([(
+                V4C_ENVIRONMENT_NAME.to_owned(),
+                OsString::from(V4C_ENVIRONMENT_VALUE),
+            )]),
+        };
+        let environment_digest = environment_bindings
+            .digest_for(&BTreeSet::from([V4C_ENVIRONMENT_NAME.to_owned()]))
+            .unwrap();
+        let bundle = VerificationBundle {
+            contract_version: LOCAL_VERIFICATION_CONTRACT_VERSION,
+            bundle_id: "bundle.v4c".to_owned(),
+            run_id: RunId::from("run-1"),
+            goal_id: goal.id.clone(),
+            task_id: TaskId::from("task-a"),
+            behavior_contract_id: behavior.contract_id.clone(),
+            capability_ids: vec![capability.capability_id.clone()],
+            implementation_actor: WorkerId::from("engineer.v4c"),
+            verifier_actor: WorkerId::from("reviewer.v4c"),
+            fingerprints: VerificationFingerprints {
+                source_pre: source_fingerprint.clone(),
+                source_post: source_fingerprint,
+                behavior_contract: verification_behavior_digest(&behavior).unwrap(),
+                capability_set: verification_capability_set_digest(&selection).unwrap(),
+                command: verification_command_set_digest(std::slice::from_ref(&capability))
+                    .unwrap(),
+                policy: policy_digest,
+                environment: environment_digest,
+            },
+            criterion_results: vec![
+                CriterionResult {
+                    criterion_id: "criterion.verify".to_owned(),
+                    order: 0,
+                    kind: BehaviorKind::Verification,
+                    text: "verified".to_owned(),
+                    verdict: CriterionResultVerdict::Pass,
+                },
+                CriterionResult {
+                    criterion_id: "criterion.verify.second".to_owned(),
+                    order: 1,
+                    kind: BehaviorKind::Verification,
+                    text: "verified second".to_owned(),
+                    verdict: CriterionResultVerdict::Pass,
+                },
+            ],
+            failures: Vec::new(),
+            verdict: VerificationVerdict::Pass,
+            created_at: timestamp(5),
+        };
+        store
+            .evidence_bank()
+            .publish_bundle_and_cas(&bundle, &ProjectionExpectation::Absent)
+            .unwrap();
+
+        let completion = LocalVerificationCompletionContract {
+            goal: goal.clone(),
+            task_ids: vec![TaskId::from("task-a")],
+            tasks: vec![ovca_runtime_core::LocalVerificationCompletionTask {
+                behavior,
+                selection,
+                capabilities: vec![capability],
+            }],
+        };
+        let authority = EnforcedLocalVerificationGoal {
+            completion,
+            source_manifest,
+            source_root: source.path().to_path_buf(),
+            environment_bindings,
+        };
+        let runtime = DurableGoalRuntime::try_new_with_completion_policy(
+            durable.path(),
+            LocalVerificationCompletionPolicy::Enforced {
+                goals: BTreeMap::from([(goal.id.clone(), authority)]),
+            },
+        )
+        .unwrap();
+        runtime
+            .create_run(
+                RunId::from("run-1"),
+                &goal,
+                &[task("task-a", &[])],
+                stamps(),
+            )
+            .unwrap();
+        append_runtime_event(
+            &runtime,
+            &goal,
+            4,
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Planned,
+                to: RunStatus::Running,
+            },
+        )
+        .unwrap();
+
+        V4cFixture {
+            _durable: durable,
+            _source: source,
+            runtime,
+            goal,
+        }
+    }
+
+    fn v4c_authority(fixture: &V4cFixture) -> EnforcedLocalVerificationGoal {
+        let LocalVerificationCompletionPolicy::Enforced { goals } =
+            &fixture.runtime.completion_policy
+        else {
+            panic!("V4c fixture must use enforced completion");
+        };
+        goals.get(&fixture.goal.id).unwrap().clone()
+    }
+
+    fn record_v4c_material(fixture: &V4cFixture) -> VerifiedCompletionMaterial {
+        let material = fixture
+            .runtime
+            .prepare_local_verification_completion(&RunId::from("run-1"), &fixture.goal)
+            .unwrap();
+        append_runtime_event(
+            &fixture.runtime,
+            &fixture.goal,
+            5,
+            Role::Coordinator,
+            RunEventPayload::EvidenceReferenceRecorded {
+                evidence: material.evidence_references[0].clone(),
+            },
+        )
+        .unwrap();
+        append_runtime_event(
+            &fixture.runtime,
+            &fixture.goal,
+            6,
+            Role::Coordinator,
+            RunEventPayload::CompletionEvidenceRecorded {
+                evidence: material.completion_evidence.clone(),
+            },
+        )
+        .unwrap();
+        material
+    }
+
+    fn v4c_final_event() -> RunEvent {
+        appended_event(
+            "event-7",
+            7,
+            "event-6",
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Running,
+                to: RunStatus::Completed,
+            },
+        )
+    }
+
+    fn v4c_evidence_key(fixture: &V4cFixture) -> EvidenceKey {
+        EvidenceKey {
+            run_id: RunId::from("run-1"),
+            goal_id: fixture.goal.id.clone(),
+            task_id: TaskId::from("task-a"),
+        }
+    }
+
+    fn replace_v4c_bundle(fixture: &V4cFixture, mutate: impl FnOnce(&mut VerificationBundle)) {
+        let store = LocalVerificationStore::try_new(fixture._durable.path()).unwrap();
+        let bank = store.evidence_bank();
+        let current = bank
+            .load_current(&v4c_evidence_key(fixture))
+            .unwrap()
+            .unwrap();
+        let mut bundle = bank
+            .load_bundle(&current.record_digest)
+            .unwrap()
+            .unwrap()
+            .bundle;
+        mutate(&mut bundle);
+        assert!(matches!(
+            bank.publish_bundle_and_cas(&bundle, &ProjectionExpectation::Token(current.token),)
+                .unwrap()
+                .projection,
+            CasOutcome::Applied(_)
+        ));
     }
 
     fn review_audit_goal() -> GoalContract {
@@ -2257,6 +3113,440 @@ mod tests {
     }
 
     #[test]
+    fn enforced_completion_blocks_generic_bypass_and_appends_only_verified_final_event() {
+        let fixture = v4c_fixture();
+        let material = fixture
+            .runtime
+            .prepare_local_verification_completion(&RunId::from("run-1"), &fixture.goal)
+            .unwrap();
+        assert_eq!(
+            fixture
+                .runtime
+                .log
+                .load_run(&RunId::from("run-1"))
+                .unwrap()
+                .len(),
+            5
+        );
+
+        let final_event = appended_event(
+            "event-7",
+            7,
+            "event-6",
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Running,
+                to: RunStatus::Completed,
+            },
+        );
+        let before_bypass = fs::read(fixture.runtime.log_path()).unwrap();
+        assert!(matches!(
+            fixture
+                .runtime
+                .append_event(final_event.clone(), &fixture.goal),
+            Err(DurableGoalRuntimeError::VerifiedCompletionRequired { .. })
+        ));
+        assert_eq!(fs::read(fixture.runtime.log_path()).unwrap(), before_bypass);
+
+        append_runtime_event(
+            &fixture.runtime,
+            &fixture.goal,
+            5,
+            Role::Coordinator,
+            RunEventPayload::EvidenceReferenceRecorded {
+                evidence: material.evidence_references[0].clone(),
+            },
+        )
+        .unwrap();
+        append_runtime_event(
+            &fixture.runtime,
+            &fixture.goal,
+            6,
+            Role::Coordinator,
+            RunEventPayload::CompletionEvidenceRecorded {
+                evidence: material.completion_evidence,
+            },
+        )
+        .unwrap();
+        let before_verified = fixture.runtime.log.load_run(&RunId::from("run-1")).unwrap();
+        let completed = fixture
+            .runtime
+            .append_verified_completion(final_event, &fixture.goal)
+            .unwrap();
+        let after_verified = fixture.runtime.log.load_run(&RunId::from("run-1")).unwrap();
+        assert_eq!(after_verified.len(), before_verified.len() + 1);
+        assert_eq!(completed.run_record.status, RunStatus::Completed);
+
+        let persisted = fs::read_to_string(fixture.runtime.log_path()).unwrap();
+        assert!(!persisted.contains(&fixture._source.path().display().to_string()));
+        assert!(!persisted.contains(V4C_ENVIRONMENT_VALUE));
+    }
+
+    #[test]
+    fn enforced_completion_resolves_persisted_goal_before_caller_contract_branch() {
+        let fixture = v4c_fixture();
+        let mut forged = fixture.goal.clone();
+        forged.objective.push_str(" caller drift");
+        let before = fs::read(fixture.runtime.log_path()).unwrap();
+        let error = fixture
+            .runtime
+            .append_event(
+                appended_event(
+                    "event-5",
+                    5,
+                    "event-4",
+                    Role::Coordinator,
+                    RunEventPayload::StatusTransition {
+                        from: RunStatus::Running,
+                        to: RunStatus::Completed,
+                    },
+                ),
+                &forged,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            DurableGoalRuntimeError::CompletionGoalContractMismatch { .. }
+        ));
+        assert_eq!(fs::read(fixture.runtime.log_path()).unwrap(), before);
+        assert!(matches!(
+            fixture
+                .runtime
+                .reconcile_verified_completion_append(&v4c_final_event(), &forged),
+            Err(DurableGoalRuntimeError::CompletionGoalContractMismatch { .. })
+        ));
+        assert_eq!(fs::read(fixture.runtime.log_path()).unwrap(), before);
+    }
+
+    #[test]
+    fn enforced_completion_rejects_missing_policy_and_persisted_task_set_mismatch_without_append() {
+        let fixture = v4c_fixture();
+        let before = fs::read(fixture.runtime.log_path()).unwrap();
+        let missing = DurableGoalRuntime {
+            log: fixture.runtime.log.clone(),
+            execution: fixture.runtime.execution.clone(),
+            guardrails: fixture.runtime.guardrails.clone(),
+            completion_policy: LocalVerificationCompletionPolicy::Enforced {
+                goals: BTreeMap::new(),
+            },
+            evidence_bank: fixture.runtime.evidence_bank.clone(),
+        };
+        assert!(matches!(
+            missing
+                .append_event(v4c_final_event(), &fixture.goal)
+                .unwrap_err(),
+            DurableGoalRuntimeError::CompletionPolicyMissing { .. }
+        ));
+        assert_eq!(fs::read(fixture.runtime.log_path()).unwrap(), before);
+        assert!(matches!(
+            missing.reconcile_verified_completion_append(&v4c_final_event(), &fixture.goal),
+            Err(DurableGoalRuntimeError::CompletionPolicyMissing { .. })
+        ));
+        assert_eq!(fs::read(fixture.runtime.log_path()).unwrap(), before);
+
+        let mut authority = v4c_authority(&fixture);
+        authority.completion.task_ids = vec![TaskId::from("task-b")];
+        authority.completion.tasks[0].selection.task_id = TaskId::from("task-b");
+        authority.completion.tasks[0].behavior.binding = BehaviorBinding::Bound {
+            goal_id: fixture.goal.id.clone(),
+            task_id: TaskId::from("task-b"),
+        };
+        let mismatch = DurableGoalRuntime {
+            log: fixture.runtime.log.clone(),
+            execution: fixture.runtime.execution.clone(),
+            guardrails: fixture.runtime.guardrails.clone(),
+            completion_policy: LocalVerificationCompletionPolicy::Enforced {
+                goals: BTreeMap::from([(fixture.goal.id.clone(), authority)]),
+            },
+            evidence_bank: fixture.runtime.evidence_bank.clone(),
+        };
+        let error = mismatch
+            .append_event(v4c_final_event(), &fixture.goal)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            DurableGoalRuntimeError::CompletionTaskSetMismatch { .. }
+        ));
+        assert_eq!(fs::read(fixture.runtime.log_path()).unwrap(), before);
+        assert!(matches!(
+            mismatch.reconcile_verified_completion_append(&v4c_final_event(), &fixture.goal),
+            Err(DurableGoalRuntimeError::CompletionTaskSetMismatch { .. })
+        ));
+        assert_eq!(fs::read(fixture.runtime.log_path()).unwrap(), before);
+    }
+
+    #[test]
+    fn completion_policy_rejects_network_like_source_roots_before_filesystem_access() {
+        let fixture = v4c_fixture();
+        let authority = v4c_authority(&fixture);
+        assert!(!is_local_absolute_source_root(Path::new("file:///remote")));
+        assert!(!is_local_absolute_source_root(Path::new(
+            "https://example.invalid/source"
+        )));
+        for root in [
+            PathBuf::from(r"\\server\share"),
+            PathBuf::from("//server/share"),
+        ] {
+            let mut rejected = authority.clone();
+            rejected.source_root = root;
+            assert!(matches!(
+                DurableGoalRuntime::try_new_with_completion_policy(
+                    fixture._durable.path(),
+                    LocalVerificationCompletionPolicy::Enforced {
+                        goals: BTreeMap::from([(fixture.goal.id.clone(), rejected)]),
+                    },
+                ),
+                Err(DurableGoalRuntimeError::InvalidCompletionPolicy { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn verified_completion_rejects_wrong_recorded_material_without_append() {
+        let fixture = v4c_fixture();
+        let wrong_reference = EvidenceRef {
+            contract_version: ContractVersion::current(),
+            id: EvidenceId::from("wrong-evidence"),
+            kind: EvidenceKind::TestResult,
+            reference: "evidence/wrong".to_owned(),
+            producer_role: Role::Coordinator,
+            integrity: None,
+            produced_at: timestamp(5),
+        };
+        append_runtime_event(
+            &fixture.runtime,
+            &fixture.goal,
+            5,
+            Role::Coordinator,
+            RunEventPayload::EvidenceReferenceRecorded {
+                evidence: wrong_reference,
+            },
+        )
+        .unwrap();
+        append_runtime_event(
+            &fixture.runtime,
+            &fixture.goal,
+            6,
+            Role::Coordinator,
+            RunEventPayload::CompletionEvidenceRecorded {
+                evidence: CompletionEvidence {
+                    contract_version: ContractVersion::current(),
+                    evidence_refs: vec![EvidenceId::from("wrong-evidence")],
+                    satisfied_acceptance_criteria: Vec::new(),
+                    satisfied_verification_criteria: vec!["verified".to_owned()],
+                    satisfied_definition_of_done: Vec::new(),
+                },
+            },
+        )
+        .unwrap();
+        let before = fs::read(fixture.runtime.log_path()).unwrap();
+        let error = fixture
+            .runtime
+            .append_verified_completion(
+                appended_event(
+                    "event-7",
+                    7,
+                    "event-6",
+                    Role::Coordinator,
+                    RunEventPayload::StatusTransition {
+                        from: RunStatus::Running,
+                        to: RunStatus::Completed,
+                    },
+                ),
+                &fixture.goal,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            DurableGoalRuntimeError::LocalVerificationAdmission { .. }
+        ));
+        assert_eq!(fs::read(fixture.runtime.log_path()).unwrap(), before);
+    }
+
+    #[test]
+    fn verified_completion_rechecks_live_source_and_appends_nothing_on_drift() {
+        let fixture = v4c_fixture();
+        let material = fixture
+            .runtime
+            .prepare_local_verification_completion(&RunId::from("run-1"), &fixture.goal)
+            .unwrap();
+        append_runtime_event(
+            &fixture.runtime,
+            &fixture.goal,
+            5,
+            Role::Coordinator,
+            RunEventPayload::EvidenceReferenceRecorded {
+                evidence: material.evidence_references[0].clone(),
+            },
+        )
+        .unwrap();
+        append_runtime_event(
+            &fixture.runtime,
+            &fixture.goal,
+            6,
+            Role::Coordinator,
+            RunEventPayload::CompletionEvidenceRecorded {
+                evidence: material.completion_evidence,
+            },
+        )
+        .unwrap();
+        fs::write(
+            fixture._source.path().join("input.txt"),
+            b"changed after preparation\n",
+        )
+        .unwrap();
+        let before = fs::read(fixture.runtime.log_path()).unwrap();
+        assert!(matches!(
+            fixture.runtime.append_verified_completion(
+                appended_event(
+                    "event-7",
+                    7,
+                    "event-6",
+                    Role::Coordinator,
+                    RunEventPayload::StatusTransition {
+                        from: RunStatus::Running,
+                        to: RunStatus::Completed,
+                    },
+                ),
+                &fixture.goal,
+            ),
+            Err(DurableGoalRuntimeError::LocalVerificationSnapshot { .. })
+        ));
+        assert_eq!(fs::read(fixture.runtime.log_path()).unwrap(), before);
+    }
+
+    #[test]
+    fn verified_completion_rejects_stale_and_nonpass_current_bundles_without_append() {
+        let stale = v4c_fixture();
+        record_v4c_material(&stale);
+        let stale_store = LocalVerificationStore::try_new(stale._durable.path()).unwrap();
+        let stale_bank = stale_store.evidence_bank();
+        let stale_key = v4c_evidence_key(&stale);
+        let stale_current = stale_bank.load_current(&stale_key).unwrap().unwrap();
+        assert!(matches!(
+            stale_bank
+                .mark_stale(
+                    &stale_key,
+                    &stale_current.token,
+                    BTreeSet::from([StaleCause::Environment]),
+                )
+                .unwrap(),
+            CasOutcome::Applied(_)
+        ));
+        let before_stale = fs::read(stale.runtime.log_path()).unwrap();
+        assert!(stale
+            .runtime
+            .append_verified_completion(v4c_final_event(), &stale.goal)
+            .is_err());
+        assert_eq!(fs::read(stale.runtime.log_path()).unwrap(), before_stale);
+
+        let nonpass = v4c_fixture();
+        record_v4c_material(&nonpass);
+        replace_v4c_bundle(&nonpass, |bundle| {
+            bundle.bundle_id = "bundle.v4c.nonpass".to_owned();
+            bundle.verdict = VerificationVerdict::Fail;
+            bundle.criterion_results[0].verdict = CriterionResultVerdict::Fail;
+            bundle.failures = vec![VerificationFailure {
+                contract_version: LOCAL_VERIFICATION_CONTRACT_VERSION,
+                failure_id: "failure.v4c.nonpass".to_owned(),
+                category: VerificationFailureCategory::ProductBug,
+                confirmation: FailureConfirmation::Provisional,
+                supersedes_failure_id: None,
+                criterion_id: Some("criterion.verify".to_owned()),
+                summary: "bounded non-pass regression".to_owned(),
+                recorded_at: timestamp(5),
+            }];
+        });
+        let before_nonpass = fs::read(nonpass.runtime.log_path()).unwrap();
+        assert!(nonpass
+            .runtime
+            .append_verified_completion(v4c_final_event(), &nonpass.goal)
+            .is_err());
+        assert_eq!(
+            fs::read(nonpass.runtime.log_path()).unwrap(),
+            before_nonpass
+        );
+    }
+
+    #[test]
+    fn verified_completion_rejects_fingerprint_and_incomplete_coverage_without_append() {
+        let fingerprint = v4c_fixture();
+        record_v4c_material(&fingerprint);
+        replace_v4c_bundle(&fingerprint, |bundle| {
+            bundle.bundle_id = "bundle.v4c.environment-drift".to_owned();
+            bundle.fingerprints.environment = verification_sha256_hex(b"different environment");
+        });
+        let before_fingerprint = fs::read(fingerprint.runtime.log_path()).unwrap();
+        assert!(fingerprint
+            .runtime
+            .append_verified_completion(v4c_final_event(), &fingerprint.goal)
+            .is_err());
+        assert_eq!(
+            fs::read(fingerprint.runtime.log_path()).unwrap(),
+            before_fingerprint
+        );
+
+        let incomplete = v4c_fixture();
+        record_v4c_material(&incomplete);
+        replace_v4c_bundle(&incomplete, |bundle| {
+            bundle.bundle_id = "bundle.v4c.incomplete".to_owned();
+            bundle.criterion_results.pop();
+        });
+        let before_incomplete = fs::read(incomplete.runtime.log_path()).unwrap();
+        assert!(incomplete
+            .runtime
+            .append_verified_completion(v4c_final_event(), &incomplete.goal)
+            .is_err());
+        assert_eq!(
+            fs::read(incomplete.runtime.log_path()).unwrap(),
+            before_incomplete
+        );
+    }
+
+    #[test]
+    fn verified_completion_rejects_partial_mixed_task_projection_without_append() {
+        let fixture = v4c_fixture();
+        record_v4c_material(&fixture);
+        let store = LocalVerificationStore::try_new(fixture._durable.path()).unwrap();
+        let registry = store.capability_registry();
+        let bank = store.evidence_bank();
+        let current = bank
+            .load_current(&v4c_evidence_key(&fixture))
+            .unwrap()
+            .unwrap();
+        let mut mixed = bank
+            .load_bundle(&current.record_digest)
+            .unwrap()
+            .unwrap()
+            .bundle;
+        mixed.bundle_id = "bundle.v4c.mixed-task".to_owned();
+        mixed.task_id = TaskId::from("task-b");
+        let mixed_current = match bank
+            .publish_bundle_and_cas(&mixed, &ProjectionExpectation::Absent)
+            .unwrap()
+            .projection
+        {
+            CasOutcome::Applied(current) => current,
+            other => panic!("unexpected mixed projection: {other:?}"),
+        };
+        let capability_current = registry.load_current("capability.v4c").unwrap().unwrap();
+        let projection = AuthoritativeProjectionSelection::new(
+            ProjectionRebuildIntent::Replace,
+            vec![capability_current],
+            vec![mixed_current],
+        )
+        .unwrap();
+        store.rebuild_projections(&projection).unwrap();
+
+        let before = fs::read(fixture.runtime.log_path()).unwrap();
+        assert!(fixture
+            .runtime
+            .append_verified_completion(v4c_final_event(), &fixture.goal)
+            .is_err());
+        assert_eq!(fs::read(fixture.runtime.log_path()).unwrap(), before);
+    }
+
+    #[test]
     fn durable_missing_required_review_rejects_without_changing_jsonl() {
         let dir = TempDir::new().unwrap();
         let goal = review_audit_goal();
@@ -3074,5 +4364,90 @@ mod tests {
             reopened.load_run(&RunId::from("run-1"), &goal).unwrap(),
             finalized
         );
+    }
+
+    #[test]
+    fn completion_append_reconciliation_rejects_disabled_policy_without_mutation() {
+        let dir = TempDir::new().unwrap();
+        let goal = goal();
+        let runtime = DurableGoalRuntime::new(dir.path());
+        runtime
+            .create_run(
+                RunId::from("run-1"),
+                &goal,
+                &[task("task-a", &[])],
+                stamps(),
+            )
+            .unwrap();
+        append_runtime_event(
+            &runtime,
+            &goal,
+            4,
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Planned,
+                to: RunStatus::Running,
+            },
+        )
+        .unwrap();
+        let evidence = EvidenceRef {
+            contract_version: ContractVersion::current(),
+            id: EvidenceId::from("evidence-v5"),
+            kind: EvidenceKind::TestResult,
+            reference: "evidence/v5".to_owned(),
+            producer_role: Role::Coordinator,
+            integrity: None,
+            produced_at: timestamp(5),
+        };
+        append_runtime_event(
+            &runtime,
+            &goal,
+            5,
+            Role::Coordinator,
+            RunEventPayload::EvidenceReferenceRecorded {
+                evidence: evidence.clone(),
+            },
+        )
+        .unwrap();
+        append_runtime_event(
+            &runtime,
+            &goal,
+            6,
+            Role::Coordinator,
+            RunEventPayload::CompletionEvidenceRecorded {
+                evidence: CompletionEvidence {
+                    contract_version: ContractVersion::current(),
+                    evidence_refs: vec![evidence.id],
+                    satisfied_acceptance_criteria: vec![],
+                    satisfied_verification_criteria: vec![],
+                    satisfied_definition_of_done: vec![],
+                },
+            },
+        )
+        .unwrap();
+        let completion = appended_event(
+            "event-7",
+            7,
+            "event-6",
+            Role::Coordinator,
+            RunEventPayload::StatusTransition {
+                from: RunStatus::Running,
+                to: RunStatus::Completed,
+            },
+        );
+        let before = fs::read(runtime.log_path()).unwrap();
+        assert!(matches!(
+            runtime.reconcile_verified_completion_append(&completion, &goal),
+            Err(DurableGoalRuntimeError::VerifiedCompletionNotRequired { .. })
+        ));
+        assert_eq!(fs::read(runtime.log_path()).unwrap(), before);
+
+        let mut altered_goal = goal.clone();
+        altered_goal.objective = "same identity, different authority".to_owned();
+        assert!(matches!(
+            runtime.reconcile_verified_completion_append(&completion, &altered_goal),
+            Err(DurableGoalRuntimeError::VerifiedCompletionNotRequired { .. })
+        ));
+        assert_eq!(fs::read(runtime.log_path()).unwrap(), before);
     }
 }
