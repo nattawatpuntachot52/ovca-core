@@ -22,6 +22,7 @@ use std::fs;
 use tempfile::TempDir;
 
 const FIXTURE: &str = include_str!("fixtures/goal_runtime_p5_golden_cases.json");
+const FROZEN_FIXTURE_LF_BYTES: usize = 9_680;
 const FROZEN_FIXTURE_SHA256: &str =
     "e669918d7add262321f359ed9dd76727ef82310b519271d913dd7a2f79d5dde3";
 
@@ -52,9 +53,32 @@ struct CaseInput {
     excluded_markers: Vec<&'static str>,
 }
 
+fn canonical_fixture_lf_bytes(fixture: &str) -> Result<Vec<u8>, &'static str> {
+    let raw = fixture.as_bytes();
+    let mut canonical = Vec::with_capacity(raw.len());
+    let mut cursor = 0;
+
+    while cursor < raw.len() {
+        if raw[cursor] == b'\r' {
+            if raw.get(cursor + 1) != Some(&b'\n') {
+                return Err("fixture contains a lone carriage return");
+            }
+            canonical.push(b'\n');
+            cursor += 2;
+        } else {
+            canonical.push(raw[cursor]);
+            cursor += 1;
+        }
+    }
+
+    Ok(canonical)
+}
+
 #[test]
 fn golden_goal_runtime_regression_cases_remain_deterministic() {
     let fixture: GoldenFixture = serde_json::from_str(FIXTURE).unwrap();
+    let canonical_fixture = canonical_fixture_lf_bytes(FIXTURE)
+        .expect("fixture must contain only LF or paired CRLF line endings");
     assert_eq!(fixture.schema_version, 1);
     assert_eq!(
         fixture.cases.len(),
@@ -62,7 +86,12 @@ fn golden_goal_runtime_regression_cases_remain_deterministic() {
         "fixture must retain exactly 41 cases"
     );
     assert_eq!(
-        verification_sha256_hex(FIXTURE.as_bytes()),
+        canonical_fixture.len(),
+        FROZEN_FIXTURE_LF_BYTES,
+        "canonical fixture length is immutable"
+    );
+    assert_eq!(
+        verification_sha256_hex(&canonical_fixture),
         FROZEN_FIXTURE_SHA256,
         "fixture bytes, case identities, and expected results are immutable"
     );
@@ -79,6 +108,32 @@ fn golden_goal_runtime_regression_cases_remain_deterministic() {
     for case in &fixture.cases {
         run_case(case);
     }
+}
+
+#[test]
+fn fixture_fingerprint_accepts_lf_and_crlf_but_rejects_lone_cr() {
+    let lf = canonical_fixture_lf_bytes(FIXTURE).unwrap();
+    let mut crlf = Vec::with_capacity(lf.len() + lf.iter().filter(|byte| **byte == b'\n').count());
+    for byte in &lf {
+        if *byte == b'\n' {
+            crlf.push(b'\r');
+        }
+        crlf.push(*byte);
+    }
+    let crlf = String::from_utf8(crlf).unwrap();
+    let canonical_crlf = canonical_fixture_lf_bytes(&crlf).unwrap();
+
+    assert_eq!(canonical_crlf, lf);
+    assert_eq!(lf.len(), FROZEN_FIXTURE_LF_BYTES);
+    assert_eq!(verification_sha256_hex(&lf), FROZEN_FIXTURE_SHA256);
+    assert_eq!(
+        verification_sha256_hex(&canonical_crlf),
+        FROZEN_FIXTURE_SHA256
+    );
+    assert_eq!(
+        canonical_fixture_lf_bytes("{\r}"),
+        Err("fixture contains a lone carriage return")
+    );
 }
 
 fn run_case(case: &GoldenCase) {
