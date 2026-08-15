@@ -11,7 +11,14 @@ description = "Oracle shared observability helpers - tracing initialization and 
 
 [dependencies]
 axum               = { workspace = true }
+ovca-runtime-core  = { path = "../ovca-runtime-core" }
+ovca-types         = { path = "../ovca-types" }
 serde              = { workspace = true }
 serde_json         = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+chrono   = { workspace = true }
+ovca-storage = { path = "../ovca-storage" }
+tempfile = { workspace = true }

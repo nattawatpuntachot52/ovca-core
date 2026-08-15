@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"id":"p0_draft_contract","scenario":"draft","expected_outcome":"draft","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":1,"coverage":["p0_contracts"]},
+    {"id":"p0_accept_transition","scenario":"accepted","expected_outcome":"in_progress","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":2,"coverage":["p0_transitions"]},
+    {"id":"p0_plan_transition","scenario":"planned_sequential","expected_outcome":"in_progress","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":4,"coverage":["p0_transitions"]},
+    {"id":"p0_run_transition","scenario":"running","expected_outcome":"in_progress","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":5,"coverage":["p0_transitions"]},
+    {"id":"p0_fail_transition","scenario":"failed","expected_outcome":"failed","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":6,"coverage":["p0_transitions"]},
+    {"id":"p0_cancel_transition","scenario":"cancelled","expected_outcome":"cancelled","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":5,"coverage":["p0_transitions","cancellation"]},
+    {"id":"p0_event_identity","scenario":"accepted","expected_outcome":"in_progress","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":2,"coverage":["p0_contracts"]},
+    {"id":"p0_chain_link","scenario":"running","expected_outcome":"in_progress","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":5,"coverage":["p0_contracts"]},
+    {"id":"p0_schema_version","scenario":"draft","expected_outcome":"draft","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":1,"coverage":["p0_contracts"]},
+
+    {"id":"p1_sequential_plan","scenario":"planned_sequential","expected_outcome":"in_progress","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":4,"coverage":["sequential"]},
+    {"id":"p1_parallel_plan","scenario":"planned_parallel","expected_outcome":"in_progress","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":4,"coverage":["parallel"]},
+    {"id":"p1_routed_waves","scenario":"planned_routed","expected_outcome":"in_progress","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":4,"coverage":["routing","parallel","sequential"]},
+    {"id":"p1_task_ready","scenario":"task_ready","expected_outcome":"in_progress","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":6,"coverage":["p0_transitions"]},
+    {"id":"p1_task_running","scenario":"task_running","expected_outcome":"in_progress","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":7,"coverage":["p0_transitions"]},
+    {"id":"p1_task_completed","scenario":"task_completed","expected_outcome":"in_progress","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":8,"coverage":["p0_transitions"]},
+    {"id":"p1_task_cancelled","scenario":"task_cancelled","expected_outcome":"in_progress","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":6,"coverage":["cancellation"]},
+
+    {"id":"p2_claim_and_lease","scenario":"running","expected_outcome":"in_progress","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":5,"coverage":["leases"],"semantic_assertion":"p2_claim_lease"},
+    {"id":"p2_retry_budget","scenario":"running","expected_outcome":"in_progress","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":5,"coverage":["retries"],"semantic_assertion":"p2_retry"},
+    {"id":"p2_task_cancellation","scenario":"task_cancelled","expected_outcome":"in_progress","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":6,"coverage":["cancellation"],"semantic_assertion":"p2_cancellation"},
+    {"id":"p2_completion_idempotency","scenario":"running","expected_outcome":"in_progress","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":5,"coverage":["idempotency"],"semantic_assertion":"p2_idempotency"},
+    {"id":"p2_rejected_prospective","scenario":"planned_sequential","expected_outcome":"in_progress","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":4,"coverage":["rejected_prospective"],"mutation":"assert_rejected_absent"},
+    {"id":"p2_durable_reload","scenario":"completed_r0","expected_outcome":"successful_completion","expected_success":true,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":8,"coverage":["durable_reload"]},
+
+    {"id":"p3_r0_completion","scenario":"guard_r0_completed","expected_outcome":"successful_completion","expected_success":true,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":9,"coverage":["p3_r0"],"semantic_assertion":"p3_r0_allow"},
+    {"id":"p3_owner_approval_pause","scenario":"guard_r2_pause","expected_outcome":"awaiting_approval","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":6,"coverage":["p3_r2"],"semantic_assertion":"p3_r2_pause"},
+    {"id":"p3_r2_pause","scenario":"guard_r2_pause","expected_outcome":"awaiting_approval","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":6,"coverage":["p3_r2"],"semantic_assertion":"p3_r2_pause"},
+    {"id":"p3_r3_denial","scenario":"guard_r3_deny","expected_outcome":"policy_denied","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":6,"coverage":["p3_r3"],"semantic_assertion":"p3_r3_deny"},
+    {"id":"p3_resume_running","scenario":"resumed_running","expected_outcome":"in_progress","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":7,"coverage":["p3_resume"]},
+
+    {"id":"p4_missing_review","scenario":"missing_review","expected_outcome":"awaiting_review","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":9,"coverage":["p4_missing_review"]},
+    {"id":"p4_review_pass","scenario":"completed_review","expected_outcome":"successful_completion","expected_success":true,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":11,"coverage":["p4_review_pass"]},
+    {"id":"p4_review_fail","scenario":"review_fail","expected_outcome":"review_failed","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":10,"coverage":["p4_review_fail"]},
+    {"id":"p4_missing_audit","scenario":"missing_audit","expected_outcome":"awaiting_audit","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":11,"coverage":["p4_missing_audit"]},
+    {"id":"p4_audit_pass","scenario":"completed_audit","expected_outcome":"successful_completion","expected_success":true,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":13,"coverage":["p4_audit_pass"]},
+    {"id":"p4_audit_fail","scenario":"audit_fail","expected_outcome":"review_failed","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":12,"coverage":["p4_audit_fail"]},
+    {"id":"p4_disagreement","scenario":"disagreement","expected_outcome":"owner_escalation","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":12,"coverage":["p4_disagreement"]},
+
+    {"id":"p5_complete_trace","scenario":"completed_r0","expected_outcome":"successful_completion","expected_success":true,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":8,"coverage":["malformed_trace"]},
+    {"id":"p5_missing_required_fields","scenario":"completed_r0","expected_outcome":"successful_completion","expected_success":false,"expected_parity":false,"expected_completeness":0.9886363636363636,"expected_span_count":8,"coverage":["malformed_trace"],"mutation":"remove_required_fields"},
+    {"id":"p5_replay_parity","scenario":"completed_r0","expected_outcome":"successful_completion","expected_success":true,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":8,"coverage":["durable_reload"]},
+    {"id":"p5_replay_mismatch","scenario":"completed_r0","expected_outcome":"successful_completion","expected_success":false,"expected_parity":false,"expected_completeness":1.0,"expected_span_count":8,"coverage":["durable_reload"],"mutation":"shift_reload_time"},
+    {"id":"p5_sensitive_redaction","scenario":"sensitive_input","expected_outcome":"draft","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":2,"coverage":["redaction"],"mutation":"assert_unstructured_omitted"},
+    {"id":"p5_unstructured_payload_omission","scenario":"boundary_note","expected_outcome":"in_progress","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":5,"coverage":["redaction"],"mutation":"assert_unstructured_omitted"},
+    {"id":"p5_invalid_review_contract","scenario":"invalid_review_contract","expected_outcome":"contract_invalid","expected_success":false,"expected_parity":true,"expected_completeness":1.0,"expected_span_count":10,"coverage":["malformed_contract"]}
+  ]
+}

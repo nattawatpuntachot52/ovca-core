@@ -12,11 +12,45 @@ keeps operational data outside the source tree.
 - Auditor: cross-audit and risk review (`18786`)
 - Policy Tools: twelve shared Rust/Python policy tools (`8775`)
 
-See [architecture](docs/architecture.md), [Policy Tools authority](docs/policy-tools-authority.md),
-[security boundary](docs/security-boundary.md), [dependency lock change](docs/dependency-lock-change.md),
-and [limitations](docs/limitations.md).
+See [architecture](docs/architecture.md), the [goal runtime contract](docs/goal-runtime-contract.md),
+the [durable orchestration runtime](docs/orchestration-runtime.md),
+[goal runtime observability and evaluations](docs/observability-evals.md),
+[Policy Tools authority](docs/policy-tools-authority.md), [security boundary](docs/security-boundary.md),
+[dependency lock change](docs/dependency-lock-change.md), and [limitations](docs/limitations.md).
 
-## How it works
+## Zoom out: two connected paths
+
+OVCA Core deliberately separates the local MCP services an operator can run
+today from the provider-independent Goal Runtime an application can embed. They
+can work together, but startup does not connect them implicitly or execute work
+on their behalf.
+
+| Path | Use it when | What it provides | What remains with the integrator |
+|---|---|---|---|
+| Local MCP services | You need local role tools, health checks, and task-packet/status surfaces | Five loopback services, shared MCP transport, and process-ownership receipts | Authentication, a client UI, worker execution, and operational data |
+| Goal Runtime library | You need deterministic planning, durable evidence, and policy-bound completion | Versioned contracts, JSONL replay, SQLite lifecycle and approvals, completion gates, and read-only evaluation | Storage roots, IDs and timestamps, worker/provider wiring, and live review or audit judgment |
+
+The Goal Runtime progresses through six additive library phases:
+
+```mermaid
+flowchart LR
+    P0["P0: contracts and transitions"] --> P1["P1: deterministic plan and JSONL replay"]
+    P1 --> P2["P2: SQLite claim, lease, retry, and write ownership"]
+    P2 --> P3["P3: risk guards and durable approvals"]
+    P3 --> P4["P4: Reviewer and Auditor completion gate"]
+    P4 --> P5["P5: redacted trace, replay parity, and evaluation"]
+```
+
+An embedding application makes the explicit connection: it supplies the goal,
+tasks, external roots, IDs, timestamps, and any provider or worker integration.
+P4 validates recorded decisions structurally; it does not summon a live Reviewer
+or Auditor. P5 is a deterministic regression-evaluation surface, not a hosted
+telemetry service or a production SLO.
+
+For a workflow-by-workflow explanation with inputs, outputs, failure states, and
+evidence files, read the [system workflow guide](docs/system-workflows.md).
+
+### Service and library map
 
 ```mermaid
 flowchart LR
@@ -26,7 +60,12 @@ flowchart LR
     Tools --> Services
     Services --> Data["External operational data"]
     App["Optional embedding application"] -.-> Graph["Routing and orchestration library"]
+    App -.-> GoalRuntime["Durable goal runtime library"]
     Graph -.-> Services
+    GoalRuntime -.-> RunLog["JSONL orchestration evidence"]
+    GoalRuntime -.-> StateDb["SQLite versioned-state database"]
+    StateDb --> ExecutionNs["execution_run: lifecycle namespace"]
+    StateDb --> ApprovalNs["guard_approval: ledger namespace"]
 ```
 
 The startup script runs Policy Tools plus four role services. Coordinator can
@@ -34,6 +73,33 @@ classify intake, create queued task packets, and aggregate specialist status.
 Engineer, Reviewer, and Auditor expose evidence-oriented tools over the shared MCP
 transport. The orchestration, brain, and runtime-guard crates are reusable library
 paths and are not launched automatically.
+
+The provider-independent goal runtime is also a library path. It validates
+versioned goal and task contracts, creates deterministic sequential or parallel
+plans, persists linked run events under a caller-supplied external root, and
+replays them into a `RunRecord`. An explicit, idempotent P2 bootstrap validates
+that planned JSONL state before initializing SQLite execution leases and write
+ownership. P3 adds deterministic input, output, and tool guards plus a durable
+pause/decision/resume boundary for sensitive R2 operations; R3 is denied by
+default. An additive runtime method associates the actual P3 result with an
+explicit run by appending a redacted, closed-policy JSONL projection. P4 records
+caller-supplied, role-bound Reviewer and Auditor decisions
+with evidence references as replayable events. A transition to `completed` is
+accepted only when the risk-selected decisions validate and resolve as `Pass`;
+missing, failed, or disagreeing decisions remain non-terminal. Orchestration,
+execution lifecycle, and approval are three logical
+authorities over two durable media: JSONL and one shared SQLite versioned-state
+database. Execution and approval use separate entity namespaces in that database.
+The APIs expose no combined execution-plus-approval transaction, and JSONL and
+SQLite have no cross-medium transaction, outbox, or reconciliation. Coordinator
+is the only role allowed to record the final response.
+
+P5 adds a provider-independent canonical trace and deterministic completeness,
+durable-reload parity, and contract-outcome graders. The read-only
+`DurableGoalRuntime::evaluate_run` API loads JSONL twice and does not append
+events or open SQLite. Recorded P3 pauses and policy denials survive reload and
+cannot grade as successful completion. Its `0.99` completeness threshold is
+enforced by a 41-case regression fixture; it is not a production telemetry SLO.
 
 Read the [workflow-by-workflow system guide](docs/system-workflows.md) for inputs,
 outputs, failure states, evidence files, and a flowchart for each workflow.
@@ -101,7 +167,34 @@ runtime callers and blocking tests prove stronger authority.
 ## Project status
 
 OVCA Core is an early public development distribution. APIs and data contracts
-may change. Legacy Aurora, Divina, and Hope enum values exist only to read old
-serialized records; they are inactive, unregistered, and have no public ports.
+may change. Legacy enum values exist only to read old serialized records; they
+are inactive, unregistered, and have no public ports.
+
+The provider-independent goal runtime version 1 contracts are
+`contract_available` in `ovca-types` and `runtime_wired` through library-only
+paths in `ovca-storage`, `ovca-runtime-core`, and `ovca-langgraph`. JSONL is the
+P1 orchestration and replay-evidence authority. SQLite is the P2 execution lease,
+retry, cancellation, idempotency, and write-ownership authority. The runtime is
+not startup-wired or HTTP-exposed, and it does not invoke live workers or a
+provider. The P3 approval ledger is a third logical authority. It uses the
+`guard_approval:` namespace in the same SQLite versioned-state database as the P2
+`execution_run:` lifecycle namespace. Current APIs expose no combined
+execution-plus-approval transaction. R2 owner approval is consumed before the
+effect closure. P3 returns Reviewer and Auditor requirements but does not create
+their decisions. P4 independently records and replays the required decisions
+with the evidence catalog before it accepts `completed`; a missing decision or a
+Reviewer/Auditor disagreement blocks completion, while R0/no-review runs remain
+compatible. An `ExplicitOwner` value is a typed caller assertion, not
+authentication or identity proof. Explicit review and audit flags select whether
+valid completion evidence is accepted from `running`, `reviewing`, or `auditing`;
+approval alone does not select those gates. This remains a library-only path: it
+does not invoke a live reviewer, auditor, worker, or provider.
+The canonical P5 trace omits free-form payloads and metadata, uses trace-local
+opaque aliases, and reports only event-backed typed facts. It includes the
+redacted P3 run projection but never the exact SQLite guard request or approval
+record. P2 execution remains separate. Identifier-free evidence reducers also
+expose actual typed P2 durable state and direct P3 allow/pause/deny results.
+P3 authority persistence and JSONL projection append have no cross-medium
+transaction, outbox, or reconciliation guarantee.
 
 Licensed under Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

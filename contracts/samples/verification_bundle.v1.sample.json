@@ -1,0 +1,46 @@
+{
+  "contract_version": 1,
+  "bundle_id": "bundle.task.sample",
+  "run_id": "run.local-verification",
+  "goal_id": "goal.local-verification",
+  "task_id": "task.sample",
+  "behavior_contract_id": "behavior.sample",
+  "capability_ids": ["cap.core"],
+  "implementation_actor": "engineer.sample",
+  "verifier_actor": "reviewer.sample",
+  "fingerprints": {
+    "source_pre": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "source_post": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "behavior_contract": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "capability_set": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "command": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "policy": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "environment": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  },
+  "criterion_results": [
+    {
+      "criterion_id": "criterion.accept.sample",
+      "order": 0,
+      "kind": "acceptance",
+      "text": "The local contract is accepted",
+      "verdict": "pass"
+    },
+    {
+      "criterion_id": "criterion.verify.sample",
+      "order": 1,
+      "kind": "verification",
+      "text": "The deterministic test passes",
+      "verdict": "pass"
+    },
+    {
+      "criterion_id": "criterion.dod.sample",
+      "order": 2,
+      "kind": "definition_of_done",
+      "text": "The immutable evidence is attached",
+      "verdict": "pass"
+    }
+  ],
+  "failures": [],
+  "verdict": "pass",
+  "created_at": "2026-08-09T12:00:00Z"
+}

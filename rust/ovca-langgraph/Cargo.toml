@@ -13,8 +13,10 @@ description = "Oracle state machine - intake, route, specialist, grade, rewrite,
 ovca-types      = { path = "../ovca-types" }
 ovca-brain      = { path = "../ovca-brain" }
 ovca-llm-client = { path = "../ovca-llm-client" }
+ovca-observability = { path = "../ovca-observability" }
 ovca-runtime-core = { path = "../ovca-runtime-core" }
 ovca-storage    = { path = "../ovca-storage" }
+ovca-verifier   = { path = "../ovca-verifier" }
 tokio             = { workspace = true }
 serde             = { workspace = true }
 serde_json        = { workspace = true }
@@ -23,7 +25,7 @@ uuid              = { workspace = true }
 regex             = { workspace = true }
 anyhow            = { workspace = true }
 tracing           = { workspace = true }
+tempfile          = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 tokio    = { workspace = true, features = ["full"] }

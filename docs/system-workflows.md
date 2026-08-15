@@ -39,6 +39,8 @@ data, build, log, and PID roots when starting the system.
 | `HTTP-exposed` | A running service exposes the workflow through HTTP |
 | `library-only` | Source and tests exist, but the startup script does not launch it |
 | `compatibility-only` | Kept for embedding, parity, or old serialized data, not as an active public worker |
+| `contract_available` | Versioned models or pure validation are public, with no claim that a runtime consumes them |
+| `runtime_wired` | A runtime component consumes the contract to drive behavior; the P1 goal runtime has this status as a library path |
 
 ## 3. Whole-system view
 
@@ -67,6 +69,9 @@ flowchart TD
     Auditor --> ExternalData
 
     EmbeddingApp["Optional embedding application"] -.-> Graph["LangGraph-style library"]
+    EmbeddingApp -.-> GoalContracts["Goal contracts: contract_available"]
+    EmbeddingApp -.-> GoalRuntime["Durable goal runtime: library-only"]
+    GoalRuntime -.-> RunEvents["External strict run-event log"]
     Graph -.-> Coordinator
     Graph -.-> Engineer
     Graph -.-> Reviewer
@@ -78,10 +83,46 @@ flowchart TD
 The solid lines are the public startup and HTTP surfaces. Dashed lines are
 library-level integration paths that require an embedding caller.
 
+## Zoom out: choose the operating path
+
+OVCA Core exposes two deliberately separate paths. The first is the local MCP
+runtime that an operator starts today. The second is the provider-independent
+Goal Runtime that an application embeds explicitly. Neither path claims to
+perform live worker execution, authenticate an owner, call a provider, or make a
+semantic review or audit judgment by itself.
+
+```mermaid
+flowchart TB
+    Operator["Operator or local client"] --> Start["Start five loopback MCP services"]
+    Start --> Tools["Discover role and Policy Tools"]
+    Host["Embedding application"] --> Contracts["P0 contracts"]
+    Contracts --> Plan["P1 plan and durable JSONL replay"]
+    Plan --> Lifecycle["P2 SQLite execution lifecycle"]
+    Lifecycle --> Guards["P3 guard and approval lifecycle"]
+    Guards --> Gate["P4 durable completion gate"]
+    Gate --> Evals["P5 canonical trace and deterministic evaluation"]
+    Host -. "explicit MCP calls only" .-> Tools
+```
+
+| Phase | Result | Important boundary |
+|---|---|---|
+| P0 | Versioned project, goal, task, run, evidence, permission, and transition contracts | Public models and pure validation only |
+| P1 | Deterministic scheduling, Coordinator final-answer ownership, durable JSONL evidence, and strict replay | Library-only; it does not invoke a role |
+| P2 | SQLite claim, lease, heartbeat, retry, cancellation, idempotency, and write ownership | Caller explicitly initializes this authority after JSONL planning |
+| P3 | R0-R3 policy evaluation and durable R2 pause, decision, and one-time resume | `ExplicitOwner` is a caller assertion, not authentication |
+| P4 | Evidence-bound Reviewer/Auditor decisions block `completed` until required decisions resolve as `Pass` | Structural decision validation, not live semantic judgment |
+| P5 | Redacted canonical trace plus completeness, replay-parity, and contract-outcome graders | Library-only fixture evidence, not a hosted telemetry backend or production SLO |
+
+The rest of this guide explains the concrete workflows within those paths. The
+P0-P5 sequence is covered primarily by Workflow 11; Workflow 10 is the separate
+LangGraph-style orchestration library, and it is not automatically started or
+connected to the Goal Runtime.
+
 ## 4. Workflow index
 
 | Workflow | Runtime status | Primary result |
 |---|---|---|
+| Goal runtime contracts | `contract_available` | Versioned models and risk-selected transition validation |
 | 1. Start the local runtime | `startup-wired` | Five owned local processes |
 | 2. Discover and call an MCP tool | `HTTP-exposed` | Normalized JSON response |
 | 3. Classify intake and choose a role | `HTTP-exposed` | Route decision, not execution |
@@ -92,8 +133,9 @@ library-level integration paths that require an embedding caller.
 | 8. Aggregate team status | `HTTP-exposed` | Combined status with offline detection |
 | 9. Run a Policy Tool | `startup-wired`, `HTTP-exposed` | Structured policy result |
 | 10. Run the orchestration loop | `library-only` | Graded and synthesized response |
-| 11. Record runtime evidence and use brain context | `library-only` | JSONL events, snapshot, and retrieval context |
-| 12. Check health and stop owned processes | `startup-wired` | Health table or identity-safe shutdown |
+| 11. Create and replay a durable goal run | `runtime_wired`, `library-only` | Deterministic plan and replayed event-backed run |
+| 12. Record runtime evidence and use brain context | `library-only` | JSONL events, snapshot, and retrieval context |
+| 13. Check health and stop owned processes | `startup-wired` | Health table or identity-safe shutdown |
 
 ## 5. Workflow 1: Start the local runtime
 
@@ -496,7 +538,148 @@ the grade/rewrite loop may retry up to the configured limit.
 **Evidence:** `rust/ovca-langgraph/src/lib.rs`,
 `rust/ovca-runtime-core/src/lib.rs`, `rust/ovca-brain/src/search.rs`
 
-## 15. Workflow 11: Record runtime evidence and use brain context
+## 15. Workflow 11: Create and replay a durable goal run
+
+**Status:** `runtime_wired`, `library-only`
+
+**What it does:** Validates versioned goal and task contracts, creates a
+deterministic execution plan, writes four linked Coordinator bootstrap events to
+an external strict JSONL log, and reloads them into a `ReplayedRun` in `planned`.
+Later caller-supplied events are replayed in memory before they are appended.
+
+**Why it exists:** Planning, durable evidence, final-answer ownership, worker
+lease/write ownership, and sensitive-effect approval need provider-independent
+contracts with explicit authority boundaries.
+
+**Inputs:** `GoalContract`, pending tasks, `RunId`, four caller-supplied event
+IDs and timestamps, caller-supplied retry budget, typed guard requests and owner
+decisions, and an external storage root.
+
+**Output:** An `ExecutionPlan`, durable linked events, replayed orchestration
+state, durable SQLite execution state, an independent approval record when R2
+pauses, a redacted P3 result associated with an explicit run, typed
+guarded-execution results, and an optional read-only canonical trace evaluation.
+
+```mermaid
+flowchart TD
+    Input["Goal, tasks, IDs, timestamps"] --> Validate["Validate versions, tasks, and stamps"]
+    Validate --> Schedule["Create deterministic waves"]
+    Schedule --> Events["Create four Coordinator bootstrap events"]
+    Events --> Replay["Prospective replay"]
+    Replay -->|"Invalid"| Reject["Reject without writing"]
+    Replay -->|"Valid"| Persist["Append, flush, and sync JSONL"]
+    Persist --> Reload["Strict reload and replay"]
+    Reload --> Planned["Return planned ReplayedRun"]
+    Planned --> Explicit["Explicit initialize_execution"]
+    Explicit --> ValidateExecution["Validate goal, task set, statuses, and plan"]
+    ValidateExecution -->|"Mismatch"| RejectSqlite["Reject before SQLite write"]
+    ValidateExecution -->|"Valid"| Sqlite["Initialize execution_run: entity in shared SQLite state DB"]
+    Sqlite --> Combined["Return both authority views"]
+```
+
+Read-only evaluation follows a separate path and does not open SQLite:
+
+```mermaid
+flowchart TD
+    Evaluate["evaluate_run"] --> LoadA["Strict JSONL load"]
+    Evaluate --> LoadB["Independent strict JSONL reload"]
+    LoadA --> ReplayA["Replay against GoalContract"]
+    LoadB --> ReplayB["Replay against GoalContract"]
+    ReplayA --> TraceA["Canonical redacted trace"]
+    ReplayB --> TraceB["Canonical reloaded trace"]
+    TraceA --> Grade["Completeness, parity, and outcome graders"]
+    TraceB --> Grade
+    Grade --> Result["Read-only GoalRuntimeEvaluation"]
+```
+
+Guarded effects use a third logical authority rooted below the same external
+root. Its entities share the SQLite versioned-state database with execution:
+
+```mermaid
+flowchart TD
+    Guard["Input, output, or tool GuardRequest"] --> Policy{"Validated P3 risk tier"}
+    Policy -->|"R0"| Allow["Execute once without approval state"]
+    Policy -->|"R1"| ReviewGate["Execute and return Reviewer requirement"]
+    Policy -->|"R2"| Pause["Persist exact guard_approval: entity in shared SQLite state DB"]
+    Policy -->|"R3"| Deny["Deny by default before effect"]
+    Allow --> Project["Append closed P3 result to explicit JSONL run"]
+    Pause --> Project
+    Deny --> Project
+    Pause --> Owner{"Typed caller owner decision"}
+    Owner -->|"Denied"| Stop["Do not execute"]
+    Owner -->|"Approved"| Exact{"Request and permission still exact?"}
+    Exact -->|"No"| Mismatch["Reject; keep approval unconsumed"]
+    Exact -->|"Yes"| Consume["Consume approval with CAS"]
+    Consume --> Effect["Invoke closure at most once"]
+    Effect --> Downstream["Return requirements; P4 records separate completion decisions"]
+```
+
+**Authority boundary:** JSONL is authoritative for orchestration events, replay,
+run status, evidence, and the Coordinator final response. SQLite is authoritative
+for execution claims, leases, retries, cancellation, idempotency, revisions, and
+write ownership. The approval ledger is authoritative for exact R2 requests,
+caller decisions, and consumption. Execution uses `execution_run:` entities and
+approval uses `guard_approval:` entities in the same SQLite versioned-state
+database. These are three logical authorities over two durable media. Current
+APIs expose no combined execution-plus-approval transaction. JSONL and SQLite
+have no cross-medium transaction, outbox, or reconciliation guarantee. The
+redacted P3 projection is appended after authority evaluation and is not an
+approval-ledger replica or atomic second write. A SQLite execution entity may
+show `running` while JSONL still shows `pending`; the APIs expose both states
+without declaring either stale.
+
+`ApprovalAuthority::ExplicitOwner` is a typed caller assertion, not
+authentication, tenancy, credential, session, or identity proof. P3 returns
+Reviewer and Auditor requirements but does not claim that their decisions have
+occurred. P4 independently records evidence references, requirements, and
+role-bound decisions in the durable run log. It rejects `completed` when a
+required decision is missing, invalid, failed, or conflicts with the other role;
+only a resolved `Pass` may complete the run. Approval is consumed before the
+effect closure, and consumption is not atomic with an external side effect.
+Failure or panic after consumption can leave no external effect under the
+documented at-most-once/no-retry boundary.
+
+Canonical trace spans use trace-local run, event, and task aliases and retain
+only typed event-backed facts. Event metadata and free-form payloads are omitted.
+Completeness is measured against required fields for the authoritative event
+count; exact parity is checked after independent reload. Recorded P3 pauses,
+recorded policy denials, failed or missing decisions, disagreement, failed runs,
+and cancelled runs never grade as successful completion. The threshold and
+41-case dataset are regression fixture evidence, not a production telemetry SLO.
+
+P2/P3 regression cases invoke actual SQLite claim/lease, retry, idempotency, and
+cancellation commands and actual R0/R2/R3 guard evaluation. P2 evidence is
+extracted from reloaded durable task state. P3 results are reduced to closed
+projections, appended to JSONL, reloaded from bytes, and evaluated as
+run-associated allow, pause, or policy-denied outcomes. `GuardRequest` itself
+still has no run ID; the association method requires one explicitly.
+
+**Recovery:** `create_run` writes no SQLite state. If the process stops after the
+planned JSONL run is durable, the missing execution run is a recoverable gap.
+Retrying `initialize_execution` with the identical definitions succeeds
+idempotently. Changed task definitions or retry budget fail without replacement.
+
+**Failure states:** Unsupported contracts, invalid task graphs, malformed JSONL,
+broken event links, invalid transitions, unattached completion evidence, a
+specialist final response, bootstrap identity/status mismatch, corrupt execution
+state, or an existing SQLite definition conflict fail explicitly. A storage
+error during the four sequential JSONL appends can leave a replayable partial
+run. Invalid R2 definitions deny or conflict before the effect; request or
+permission mismatch cannot resume; R3 denies before the effect. P3 includes no
+live HTTP, provider, service, authentication, or credential wiring. It adds no
+combined execution-plus-approval transaction, and JSONL/SQLite have no
+cross-medium transaction, P2 lifecycle projection, reconciliation, or outbox
+wiring. P3 authority success followed by JSONL append failure is not repaired
+automatically.
+
+**Evidence:** `rust/ovca-langgraph/src/goal_runtime.rs`,
+`rust/ovca-runtime-core/src/replay.rs`,
+`rust/ovca-storage/src/run_events.rs`,
+`rust/ovca-observability/tests/goal_runtime_evals.rs`,
+`docs/orchestration-runtime.md`,
+`docs/observability-evals.md`
+
+## 16. Workflow 12: Record runtime evidence and use brain context
 
 **Status:** `library-only`
 
@@ -536,7 +719,7 @@ context rather than inventing data.
 **Evidence:** `rust/ovca-runtime-core/src/lib.rs`, `rust/ovca-brain/src`,
 `rust/ovca-storage/src`
 
-## 16. Workflow 12: Check health and stop owned processes
+## 17. Workflow 13: Check health and stop owned processes
 
 **Status:** `startup-wired`
 
@@ -569,7 +752,7 @@ and `healthy: false`.
 
 **Evidence:** `scripts/ovca.ps1`, `scripts/tests/test_ovca_startup_script.py`
 
-## 17. What is verified, inferred, and unknown
+## 18. What is verified, inferred, and unknown
 
 ### Observed in source and tests
 
@@ -579,6 +762,18 @@ and `healthy: false`.
 - Coordinator routing accepts only public active role IDs.
 - Reviewer and Auditor return `unknown` when no matching evidence exists.
 - Team aggregation preserves partial responses and reports offline roles.
+- The durable goal runtime schedules, persists, and replays library-owned run
+  events while preserving Coordinator final-answer ownership, and explicitly
+  bootstraps an independent SQLite execution authority. Its P3 guard executes R0,
+  pauses all applicable R2 paths, denies R3 by default, and consumes an exact
+  approved resume at most once across independent runtime instances. Execution
+  and approval remain separate logical authorities through distinct entity
+  namespaces in one shared SQLite versioned-state database. P4 additionally
+  blocks durable completion until the policy-required Reviewer/Auditor decisions
+  replay, validate, and resolve as `Pass`; R0/no-review completion remains
+  compatible. P5 adds a read-only canonical JSONL trace, including closed P3
+  outcomes, with deterministic completeness, durable-reload parity, and
+  contract-outcome graders.
 - The public startup does not launch the LangGraph, runtime guard, or brain
   libraries as independent services.
 
@@ -587,6 +782,8 @@ and `healthy: false`.
 - A host application can use `ovca-langgraph` as the control loop around the five
   HTTP services because the crate implements that sequence and its tests exercise
   it. The public repository does not include a hosted front end that invokes it.
+- A host application can separately embed `DurableGoalRuntime`; startup does not
+  create run IDs, timestamps, tasks, retry budgets, or storage roots for it.
 
 ### Unknown until deployed by an operator
 
@@ -595,7 +792,7 @@ and `healthy: false`.
 - Whether a downstream application enforces a Policy Tool result as a hard gate.
 - Which LLM or embedding provider an integrator configures.
 
-## 18. Verification map
+## 19. Verification map
 
 | Concern | Primary test surface |
 |---|---|
@@ -604,16 +801,20 @@ and `healthy: false`.
 | Shared MCP response behavior | Rust tests in `ovca-mcp` |
 | Role registration and calls | Rust tests in each role-server crate |
 | Route, grade, rewrite, and fallback behavior | Rust tests in `ovca-langgraph` |
+| Goal scheduling, durable append, and replay | Rust tests in `ovca-types`, `ovca-storage`, `ovca-runtime-core`, and `ovca-langgraph` |
+| P3 risk matrix, durable approval reopen, mismatch, and at-most-once resume | Rust tests in `ovca-runtime-core` and `ovca-langgraph` |
+| Goal runtime trace completeness, durable parity, redaction, actual P2/P3 authority outcomes, and P0-P4 regression | `rust/ovca-observability/tests/goal_runtime_evals.rs` and its versioned 41-case fixture |
 | Policy Tool behavior | Rust package tests and Python policy tests |
 | Rust/Python parity | `scripts/tests/test_policy_tools_rust_parity.py` |
 | Cognitive advisory helpers | `scripts/tests/test_cognitive_leadership_tools.py` |
 
-## 19. Suggested reading order
+## 20. Suggested reading order
 
 1. `README.md`
 2. This workflow guide
 3. `docs/architecture.md`
-4. `docs/security-boundary.md`
-5. `docs/policy-tools-authority.md`
-6. `docs/limitations.md`
-7. The evidence files listed under the workflow you want to change
+4. `docs/orchestration-runtime.md`
+5. `docs/security-boundary.md`
+6. `docs/policy-tools-authority.md`
+7. `docs/limitations.md`
+8. The evidence files listed under the workflow you want to change

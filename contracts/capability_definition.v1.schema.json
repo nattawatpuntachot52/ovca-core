@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CapabilityDefinitionV1",
+  "description": "Structural wire validation only. Schema success never admits evidence; every loaded value must pass the Rust CapabilityDefinition::validate semantic validator.",
+  "x-ovca-schema-role": "structural_wire_only",
+  "x-ovca-semantic-validator": "ovca_types::goal_runtime::local_verification::CapabilityDefinition::validate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "capability_id",
+    "revision",
+    "criterion_ids",
+    "dependencies",
+    "changed_path_selectors",
+    "policy",
+    "commands"
+  ],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "capability_id": { "$ref": "#/$defs/stableId" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "criterion_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/stableId" }
+    },
+    "dependencies": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/stableId" }
+    },
+    "changed_path_selectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "path"],
+        "properties": {
+          "kind": { "enum": ["exact", "prefix"] },
+          "path": { "$ref": "#/$defs/logicalPath" }
+        }
+      }
+    },
+    "policy": { "$ref": "#/$defs/localMachinePolicy" },
+    "commands": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/verificationCommand" }
+    }
+  },
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*(?![\\s\\S])"
+    },
+    "sha256Digest": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
+    },
+    "logicalPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!.*[\\u0000-\\u001F\\u007F])(?!/)(?!.*\\\\)(?!.*:)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)[^/]+(?:/[^/]+)*(?![\\s\\S])"
+    },
+    "nonShellExecutableId": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9._:-]*(?![\\s\\S])",
+      "not": {
+        "enum": [
+          "sh",
+          "bash",
+          "zsh",
+          "cmd",
+          "cmd.exe",
+          "powershell",
+          "powershell.exe",
+          "pwsh"
+        ]
+      }
+    },
+    "environmentName": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Z_][A-Z0-9_]*(?![\\s\\S])"
+    },
+    "localMachinePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "local_only",
+        "network",
+        "provider",
+        "telemetry",
+        "egress",
+        "external_evidence",
+        "external_storage",
+        "raw_shell",
+        "inherit_environment",
+        "fingerprint_algorithm",
+        "allowed_executable_ids",
+        "allowed_environment_names"
+      ],
+      "properties": {
+        "local_only": { "const": true },
+        "network": { "const": "denied" },
+        "provider": { "const": "denied" },
+        "telemetry": { "const": "denied" },
+        "egress": { "const": "denied" },
+        "external_evidence": { "const": "denied" },
+        "external_storage": { "const": "denied" },
+        "raw_shell": { "const": "forbidden" },
+        "inherit_environment": { "const": false },
+        "fingerprint_algorithm": { "const": "sha256" },
+        "allowed_executable_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonShellExecutableId" }
+        },
+        "allowed_environment_names": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/environmentName" }
+        }
+      }
+    },
+    "verificationCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command_id", "executable_id", "argv", "cwd", "environment_names"],
+      "properties": {
+        "command_id": { "$ref": "#/$defs/stableId" },
+        "executable_id": { "$ref": "#/$defs/nonShellExecutableId" },
+        "argv": {
+          "type": "array",
+          "description": "Opaque exact tokens for direct argv execution. A verifier MUST NOT percent-decode, URI-decode, shell-expand, environment-expand, or interpolate them. Percent-encoded literals are not interpreted by V0.",
+          "items": { "$ref": "#/$defs/argvToken" }
+        },
+        "cwd": { "$ref": "#/$defs/workingDirectory" },
+        "environment_names": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/environmentName" }
+        }
+      }
+    },
+    "workingDirectory": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": { "const": "snapshot_root" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "path"],
+          "properties": {
+            "type": { "const": "relative" },
+            "path": { "$ref": "#/$defs/logicalPath" }
+          }
+        }
+      ]
+    },
+    "argvToken": {
+      "type": "string",
+      "pattern": "^(?!.*[\\u0000-\\u001F\\u007F])(?!.*\\\\)(?!/)(?!.*[A-Za-z]:/)(?!.*[A-Za-z]:(?![:/]))(?![A-Za-z][A-Za-z0-9+.-]*:(?!:))(?!.*=/)(?!.*=[A-Za-z][A-Za-z0-9+.-]*:(?!:))(?!.*://).*(?![\\s\\S])"
+    }
+  }
+}

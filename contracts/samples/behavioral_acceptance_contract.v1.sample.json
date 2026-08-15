@@ -1,0 +1,35 @@
+{
+  "contract_version": 1,
+  "contract_id": "behavior.sample",
+  "binding": {
+    "type": "bound",
+    "goal_id": "goal.local-verification",
+    "task_id": "task.sample"
+  },
+  "criteria": [
+    {
+      "criterion_id": "criterion.accept.sample",
+      "order": 0,
+      "kind": "acceptance",
+      "text": "The local contract is accepted",
+      "required": true,
+      "capability_ids": ["cap.core"]
+    },
+    {
+      "criterion_id": "criterion.verify.sample",
+      "order": 1,
+      "kind": "verification",
+      "text": "The deterministic test passes",
+      "required": true,
+      "capability_ids": ["cap.core"]
+    },
+    {
+      "criterion_id": "criterion.dod.sample",
+      "order": 2,
+      "kind": "definition_of_done",
+      "text": "The immutable evidence is attached",
+      "required": true,
+      "capability_ids": ["cap.core"]
+    }
+  ]
+}

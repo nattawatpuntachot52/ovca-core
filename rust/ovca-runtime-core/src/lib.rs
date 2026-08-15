@@ -9,6 +9,48 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+pub mod durable_guardrails;
+pub mod execution_lifecycle;
+pub mod finalization;
+pub mod guardrails;
+pub mod local_verification_completion;
+pub mod replay;
+pub mod review_audit;
+pub mod scheduler;
+pub mod sqlite_execution;
+
+pub use durable_guardrails::{
+    ApprovalEnvelope, ApprovalStateCorruption, DurableApprovalError, DurableApprovalEvaluation,
+    DurableApprovalRecord, DurableDecisionResult, DurableGuardrailAuthority, GuardedExecution,
+    DEFAULT_APPROVAL_CAS_RETRY_LIMIT,
+};
+pub use execution_lifecycle::{
+    CancellationRequest, ClaimRequest, CompletionRequest, ExecutionLifecycleError,
+    ExecutionLifecycleKernel, ExecutionLifecycleRestoreError, ExecutionLifecycleSnapshot,
+    FailureRequest, HeartbeatRequest, TaskExecutionSnapshot, WriteKeyOwner,
+};
+pub use finalization::{FinalizationError, FinalizationKernel};
+pub use guardrails::{evaluate_guard_request, GuardEvaluationContext};
+pub use local_verification_completion::{
+    admit_local_verification_completion, completion_environment_names, completion_evidence_keys,
+    validate_local_verification_completion_contract, validate_persisted_completion_material,
+    LocalVerificationCompletionContract, LocalVerificationCompletionError,
+    LocalVerificationCompletionTask, LocalVerificationObservation, VerifiedCompletionMaterial,
+};
+pub use replay::{replay_run, validate_event_chain, ReplayError, ReplayedRun};
+pub use review_audit::{
+    derive_review_audit_policy, evaluate_review_audit, validate_audit_decision,
+    validate_review_decision, AuditDecisionValidationContext, ReviewAuditError,
+    ReviewAuditEvaluationContext, ReviewAuditPolicy, ReviewDecisionValidationContext,
+    ValidatedAuditDecision, ValidatedReviewDecision,
+};
+pub use scheduler::{schedule_tasks, ScheduleError};
+pub use sqlite_execution::{
+    DurableCommandResult, DurableExecutionAuthority, DurableExecutionError, ExecutionRunEnvelope,
+    ExecutionStateCorruption, InitializeRunResult, LoadedExecutionRun,
+    DEFAULT_EXECUTION_CAS_RETRY_LIMIT,
+};
+
 pub const LLM_CALL_CONTRACT_VERSION: &str = "oracle_llm_call_contract.v1";
 pub const EVENT_SCHEMA_VERSION: &str = "oracle_runtime_event.v1";
 pub const SNAPSHOT_SCHEMA_VERSION: &str = "oracle_runtime_guard_snapshot.v1";
