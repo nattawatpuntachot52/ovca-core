@@ -1,0 +1,24 @@
+{
+  "contract_version": 1,
+  "decision_id": "decision.foundation.001",
+  "kind": "approval",
+  "status": "approved",
+  "namespace": "code_review",
+  "actor": {
+    "principal_id": "principal.owner",
+    "role": "owner"
+  },
+  "subject": {
+    "principal_id": "principal.engineer",
+    "role": "engineer"
+  },
+  "scope": {
+    "project_id": "project.public",
+    "goal_id": "goal.foundation",
+    "task_id": "task.contract",
+    "run_id": "run.001"
+  },
+  "subject_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "evidence_ids": ["evidence.foundation.001"],
+  "decided_at": "2026-08-16T10:00:00Z"
+}
