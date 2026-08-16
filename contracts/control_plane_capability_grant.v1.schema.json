@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CapabilityGrantV1",
+  "description": "Structural observation only. Rust CapabilityGrantV1 validation plus same-broker TrustedCapabilityGrant registry admission is authoritative; JSON never grants authority.",
+  "x-ovca-schema-role": "structural_wire_only",
+  "x-ovca-semantic-validator": "ovca_types::tool_boundary::CapabilityGrantV1::validate and ovca_runtime_core::workspace_capability::WorkspaceCapabilityBroker::issue_grant",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "grant_id", "invocation_id", "invocation_digest", "attempt", "issuer", "grantee", "scope", "grant_authority", "grant_authority_digest", "lease_id", "lease_digest", "workspace_id", "snapshot_digest", "read_paths", "write_paths", "max_read_bytes", "max_write_bytes", "command_policy", "environment_policy", "network_policy", "valid_from", "valid_until"],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "grant_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "invocation_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "invocation_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "attempt": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+    "issuer": { "$ref": "foundation_authority.v1.schema.json#/$defs/principalIdentity" },
+    "grantee": { "$ref": "foundation_authority.v1.schema.json#/$defs/principalIdentity" },
+    "scope": { "$ref": "foundation_authority.v1.schema.json#/$defs/scope" },
+    "grant_authority": { "$ref": "foundation_authority.v1.schema.json" },
+    "grant_authority_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "lease_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "lease_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "workspace_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "snapshot_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "read_paths": { "$ref": "#/$defs/logicalPathList" },
+    "write_paths": { "$ref": "#/$defs/logicalPathList" },
+    "max_read_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 },
+    "max_write_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 },
+    "command_policy": { "const": "denied" },
+    "environment_policy": { "const": "denied" },
+    "network_policy": { "const": "denied" },
+    "valid_from": { "type": "string", "format": "date-time" },
+    "valid_until": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "logicalPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?=.{1,512}$)(?!\\.{1,2}(?:/|$))(?!.*[/]\\.{1,2}(?:/|$))[A-Za-z0-9._-]{1,128}(?:/[A-Za-z0-9._-]{1,128}){0,31}(?![\\s\\S])",
+      "x-ovca-semantic-path": "portable_ascii_no_dot_dot_reserved_trailing_dot_or_case_alias"
+    },
+    "logicalPathList": {
+      "type": "array",
+      "uniqueItems": true,
+      "x-ovca-semantic-order": "strict_byte_ordinal_ascending",
+      "items": { "$ref": "#/$defs/logicalPath" }
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WorkspaceSnapshotV1",
+  "description": "Structural wire validation only. Rust WorkspaceSnapshotV1::validate is authoritative for portable logical paths, strict byte order, ordinary files, and the canonical snapshot digest.",
+  "x-ovca-schema-role": "structural_wire_only",
+  "x-ovca-semantic-validator": "ovca_types::tool_boundary::WorkspaceSnapshotV1::validate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "workspace_id", "lease_id", "generation", "files", "snapshot_digest"],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "workspace_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "lease_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "generation": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+    "files": {
+      "type": "array",
+      "uniqueItems": true,
+      "x-ovca-semantic-order": "strict_byte_ordinal_ascending_by_logical_path",
+      "items": { "$ref": "#/$defs/workspaceFile" }
+    },
+    "snapshot_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" }
+  },
+  "$defs": {
+    "logicalPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?=.{1,512}$)(?!\\.{1,2}(?:/|$))(?!.*[/]\\.{1,2}(?:/|$))[A-Za-z0-9._-]{1,128}(?:/[A-Za-z0-9._-]{1,128}){0,31}(?![\\s\\S])",
+      "x-ovca-semantic-path": "portable_ascii_no_dot_dot_reserved_trailing_dot_or_case_alias"
+    },
+    "workspaceFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logical_path", "sha256", "byte_length"],
+      "properties": {
+        "logical_path": { "$ref": "#/$defs/logicalPath" },
+        "sha256": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+        "byte_length": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
+      }
+    }
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "contract_version": 1,
+  "grant_id": "grant.sample",
+  "invocation_id": "invocation.sample",
+  "invocation_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "attempt": 1,
+  "issuer": {
+    "principal_id": "principal.sample.coordinator",
+    "role": "coordinator"
+  },
+  "grantee": {
+    "principal_id": "principal.sample.engineer",
+    "role": "engineer"
+  },
+  "scope": {
+    "project_id": "project.sample",
+    "goal_id": "goal.sample",
+    "task_id": "task.sample",
+    "run_id": "run.sample"
+  },
+  "grant_authority": {
+    "contract_version": 1,
+    "authority_id": "authority.sample.grant",
+    "principal": {
+      "principal_id": "principal.sample.coordinator",
+      "role": "coordinator"
+    },
+    "scope": {
+      "project_id": "project.sample",
+      "goal_id": "goal.sample",
+      "task_id": "task.sample",
+      "run_id": "run.sample"
+    },
+    "namespace": "code_review",
+    "permission_profile": {
+      "contract_version": 1,
+      "risk_tier": "r2",
+      "resource_keys": [
+        "workspace.read:b1a35a68f14e696205874893c07fd24fdb88882b47c23cc0e0c80a30c7d53759",
+        "workspace.read:b335630551682c19a781afebcf4d07bf978fb1f8ac04c6bf87428ed5106870f5"
+      ],
+      "write_keys": [
+        "workspace.write:b1a35a68f14e696205874893c07fd24fdb88882b47c23cc0e0c80a30c7d53759"
+      ],
+      "approval_required": true,
+      "review_required": true,
+      "audit_required": true
+    },
+    "visibility": "role_scoped",
+    "sensitivity": "internal",
+    "validity": {
+      "status": "active",
+      "valid_from": "2026-08-17T10:00:00Z",
+      "valid_until": "2026-08-17T10:55:00Z"
+    }
+  },
+  "grant_authority_digest": "7689a446c39c81b27b79ec177c884fd1eb9714f96e0fb54bdf778017467cb000",
+  "lease_id": "lease.sample",
+  "lease_digest": "9e77710ab8261cd3164f40a0e82c7ea7d871eea824df7ec6eb3d74b2793a5196",
+  "workspace_id": "workspace.sample",
+  "snapshot_digest": "286f81f4be0ef63b94ad9c6bcaf2cab731bc5baab893f3bdb1475f204c799029",
+  "read_paths": [
+    "README.md",
+    "src/lib.rs"
+  ],
+  "write_paths": [
+    "src/lib.rs"
+  ],
+  "max_read_bytes": 1024,
+  "max_write_bytes": 1024,
+  "command_policy": "denied",
+  "environment_policy": "denied",
+  "network_policy": "denied",
+  "valid_from": "2026-08-17T10:05:00Z",
+  "valid_until": "2026-08-17T10:40:00Z"
+}

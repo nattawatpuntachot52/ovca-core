@@ -1,0 +1,30 @@
+{
+  "contract_version": 1,
+  "receipt_id": "receipt.sample.1",
+  "runtime_instance_id": "runtime.sample",
+  "sequence": 1,
+  "request_id": "request.sample",
+  "request_digest": "0e54c2675373b3bd7a60bf068546413787cf55dca47dd967d724c0fc07035b20",
+  "idempotency_key": "idempotency.sample",
+  "invocation_id": "invocation.sample",
+  "invocation_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "grant_id": "grant.sample",
+  "grant_digest": "b36cb40a58c965a8618322534f18f77845ee0367ed480ab4f1e9db3a69d87245",
+  "lease_id": "lease.sample",
+  "lease_digest": "9e77710ab8261cd3164f40a0e82c7ea7d871eea824df7ec6eb3d74b2793a5196",
+  "workspace_id": "workspace.sample",
+  "actor": {
+    "principal_id": "principal.sample.engineer",
+    "role": "engineer"
+  },
+  "before_snapshot_digest": "286f81f4be0ef63b94ad9c6bcaf2cab731bc5baab893f3bdb1475f204c799029",
+  "after_snapshot_digest": "286f81f4be0ef63b94ad9c6bcaf2cab731bc5baab893f3bdb1475f204c799029",
+  "before_generation": 0,
+  "after_generation": 0,
+  "outcome": {
+    "type": "read",
+    "content_sha256": "c97ace4c8fef2cee8fa0f3c9f52aab18dbd4f42438afe362ffb8f75ce4c04b84",
+    "byte_length": 6
+  },
+  "occurred_at": "2026-08-17T10:10:00Z"
+}

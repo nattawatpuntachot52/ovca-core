@@ -18,6 +18,15 @@ SAMPLES = CONTRACTS / "samples"
 RUST_SOURCE = ROOT / "rust" / "ovca-types" / "src" / "control_plane.rs"
 RUST_LIB = ROOT / "rust" / "ovca-types" / "src" / "lib.rs"
 ADR = ROOT / "docs" / "adr" / "0002-versioned-four-role-control-plane-contracts.md"
+TOOL_BOUNDARY_RUST_SOURCE = (
+    ROOT / "rust" / "ovca-types" / "src" / "tool_boundary.rs"
+)
+WORKSPACE_BROKER_RUST_SOURCE = (
+    ROOT / "rust" / "ovca-runtime-core" / "src" / "workspace_capability.rs"
+)
+TOOL_BOUNDARY_ADR = (
+    ROOT / "docs" / "adr" / "0004-disposable-workspace-tool-capability-boundary.md"
+)
 
 SCHEMA_SAMPLE_PAIRS = {
     "event": (
@@ -42,10 +51,34 @@ SCHEMA_SAMPLE_PAIRS = {
     ),
 }
 
+TOOL_BOUNDARY_PAIRS = {
+    "capability_grant": (
+        CONTRACTS / "control_plane_capability_grant.v1.schema.json",
+        SAMPLES / "control_plane_capability_grant.v1.sample.json",
+    ),
+    "tool_receipt": (
+        CONTRACTS / "control_plane_tool_receipt.v1.schema.json",
+        SAMPLES / "control_plane_tool_receipt.v1.sample.json",
+    ),
+    "tool_request": (
+        CONTRACTS / "control_plane_tool_request.v1.schema.json",
+        SAMPLES / "control_plane_tool_request.v1.sample.json",
+    ),
+    "workspace_lease": (
+        CONTRACTS / "control_plane_workspace_lease.v1.schema.json",
+        SAMPLES / "control_plane_workspace_lease.v1.sample.json",
+    ),
+    "workspace_snapshot": (
+        CONTRACTS / "control_plane_workspace_snapshot.v1.schema.json",
+        SAMPLES / "control_plane_workspace_snapshot.v1.sample.json",
+    ),
+}
+
 RESOURCE_PATHS = (
     CONTRACTS / "foundation_authority.v1.schema.json",
     CONTRACTS / "foundation_event_envelope.v1.schema.json",
     *(schema for schema, _ in SCHEMA_SAMPLE_PAIRS.values()),
+    *(schema for schema, _ in TOOL_BOUNDARY_PAIRS.values()),
 )
 
 OBJECT_FIELDS = {
@@ -81,6 +114,95 @@ OBJECT_FIELDS = {
         "payload",
         "evidence_ids",
         "occurred_at",
+    ],
+}
+
+TOOL_BOUNDARY_FIELDS = {
+    "capability_grant": [
+        "contract_version",
+        "grant_id",
+        "invocation_id",
+        "invocation_digest",
+        "attempt",
+        "issuer",
+        "grantee",
+        "scope",
+        "grant_authority",
+        "grant_authority_digest",
+        "lease_id",
+        "lease_digest",
+        "workspace_id",
+        "snapshot_digest",
+        "read_paths",
+        "write_paths",
+        "max_read_bytes",
+        "max_write_bytes",
+        "command_policy",
+        "environment_policy",
+        "network_policy",
+        "valid_from",
+        "valid_until",
+    ],
+    "tool_receipt": [
+        "contract_version",
+        "receipt_id",
+        "runtime_instance_id",
+        "sequence",
+        "request_id",
+        "request_digest",
+        "idempotency_key",
+        "invocation_id",
+        "invocation_digest",
+        "grant_id",
+        "grant_digest",
+        "lease_id",
+        "lease_digest",
+        "workspace_id",
+        "actor",
+        "before_snapshot_digest",
+        "after_snapshot_digest",
+        "before_generation",
+        "after_generation",
+        "outcome",
+        "occurred_at",
+    ],
+    "tool_request": [
+        "contract_version",
+        "request_id",
+        "idempotency_key",
+        "invocation_id",
+        "invocation_digest",
+        "attempt",
+        "grant_id",
+        "grant_digest",
+        "lease_id",
+        "lease_digest",
+        "workspace_id",
+        "expected_snapshot_digest",
+        "requester",
+        "scope",
+        "operation",
+        "requested_at",
+    ],
+    "workspace_lease": [
+        "contract_version",
+        "lease_id",
+        "workspace_id",
+        "invocation_id",
+        "invocation_digest",
+        "attempt",
+        "scope",
+        "initial_snapshot_digest",
+        "issued_at",
+        "expires_at",
+    ],
+    "workspace_snapshot": [
+        "contract_version",
+        "workspace_id",
+        "lease_id",
+        "generation",
+        "files",
+        "snapshot_digest",
     ],
 }
 
@@ -138,6 +260,26 @@ def _validator(name: str) -> Draft202012Validator:
 
 def _sample(name: str) -> Any:
     return _load(SCHEMA_SAMPLE_PAIRS[name][1])
+
+
+def _tool_validator(name: str) -> Draft202012Validator:
+    schema = _load(TOOL_BOUNDARY_PAIRS[name][0])
+    Draft202012Validator.check_schema(schema)
+    return Draft202012Validator(
+        schema,
+        registry=_registry(),
+        format_checker=Draft202012Validator.FORMAT_CHECKER,
+    )
+
+
+def _tool_sample(name: str) -> Any:
+    return _load(TOOL_BOUNDARY_PAIRS[name][1])
+
+
+def _assert_tool_invalid(name: str, value: Any) -> None:
+    assert list(_tool_validator(name).iter_errors(value)), (
+        f"{name} accepted {value!r}"
+    )
 
 
 def _assert_invalid(name: str, value: Any) -> None:
@@ -398,4 +540,247 @@ def test_public_hygiene_has_no_private_identity_or_machine_contract() -> None:
     for path in paths:
         text = path.read_text(encoding="utf-8")
         assert forbidden.search(text) is None, path
+        assert environment_value.search(text) is None, path
+
+
+@pytest.mark.parametrize("name", sorted(TOOL_BOUNDARY_PAIRS))
+def test_tool_boundary_draft_2020_12_schema_accepts_strict_sample(
+    name: str,
+) -> None:
+    schema = _load(TOOL_BOUNDARY_PAIRS[name][0])
+    assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+    assert schema["x-ovca-schema-role"] == "structural_wire_only"
+    assert "tool_boundary" in schema["x-ovca-semantic-validator"] or (
+        "workspace_capability" in schema["x-ovca-semantic-validator"]
+    )
+    _tool_validator(name).validate(_tool_sample(name))
+
+
+def test_tool_boundary_top_level_fields_and_nested_wire_order_are_exact() -> None:
+    for name, expected in TOOL_BOUNDARY_FIELDS.items():
+        schema = _load(TOOL_BOUNDARY_PAIRS[name][0])
+        sample = _tool_sample(name)
+        assert schema["additionalProperties"] is False
+        assert schema["required"] == expected
+        assert list(schema["properties"]) == expected
+        assert list(sample) == expected
+
+    snapshot = _tool_sample("workspace_snapshot")
+    assert list(snapshot["files"][0]) == [
+        "logical_path",
+        "sha256",
+        "byte_length",
+    ]
+    assert [item["logical_path"] for item in snapshot["files"]] == sorted(
+        item["logical_path"] for item in snapshot["files"]
+    )
+    request = _tool_sample("tool_request")
+    assert list(request["operation"]) == ["type", "logical_path"]
+    receipt = _tool_sample("tool_receipt")
+    assert list(receipt["outcome"]) == [
+        "type",
+        "content_sha256",
+        "byte_length",
+    ]
+
+
+def test_tool_boundary_samples_have_complete_canonical_digest_chain() -> None:
+    snapshot = _tool_sample("workspace_snapshot")
+    lease = _tool_sample("workspace_lease")
+    grant = _tool_sample("capability_grant")
+    request = _tool_sample("tool_request")
+    receipt = _tool_sample("tool_receipt")
+
+    snapshot_input = {
+        field: snapshot[field]
+        for field in TOOL_BOUNDARY_FIELDS["workspace_snapshot"][:5]
+    }
+    assert _canonical_digest(snapshot_input) == snapshot["snapshot_digest"]
+    assert lease["initial_snapshot_digest"] == snapshot["snapshot_digest"]
+    assert _canonical_digest(lease) == grant["lease_digest"]
+    assert (
+        _canonical_digest(grant["grant_authority"])
+        == grant["grant_authority_digest"]
+    )
+    assert _canonical_digest(grant) == request["grant_digest"]
+    assert request["lease_digest"] == grant["lease_digest"]
+    assert request["expected_snapshot_digest"] == grant["snapshot_digest"]
+    assert _canonical_digest(request) == receipt["request_digest"]
+    assert receipt["grant_digest"] == request["grant_digest"]
+    assert receipt["lease_digest"] == request["lease_digest"]
+    assert receipt["before_snapshot_digest"] == snapshot["snapshot_digest"]
+    assert receipt["after_snapshot_digest"] == snapshot["snapshot_digest"]
+    assert receipt["before_generation"] == receipt["after_generation"] == 0
+
+
+def test_capability_schema_closes_policies_roles_limits_and_path_lists() -> None:
+    sample = _tool_sample("capability_grant")
+    for field, value in (
+        ("contract_version", 2),
+        ("attempt", 0),
+        ("max_read_bytes", 0),
+        ("max_write_bytes", 16_777_217),
+        ("command_policy", "allowed"),
+        ("environment_policy", "inherited"),
+        ("network_policy", "loopback"),
+    ):
+        invalid = copy.deepcopy(sample)
+        invalid[field] = value
+        _assert_tool_invalid("capability_grant", invalid)
+    invalid = copy.deepcopy(sample)
+    invalid["read_paths"] = ["src/lib.rs", "README.md"]
+    _tool_validator("capability_grant").validate(invalid)
+    assert "strict_byte_ordinal" in json.dumps(
+        _load(TOOL_BOUNDARY_PAIRS["capability_grant"][0])
+    )
+    invalid = copy.deepcopy(sample)
+    invalid["write_paths"] = ["../escape"]
+    _assert_tool_invalid("capability_grant", invalid)
+    invalid = copy.deepcopy(sample)
+    invalid["unexpected"] = True
+    _assert_tool_invalid("capability_grant", invalid)
+
+
+def test_tool_operation_and_receipt_outcomes_are_closed_and_raw_value_free() -> None:
+    request = _tool_sample("tool_request")
+    request_schema_text = TOOL_BOUNDARY_PAIRS["tool_request"][0].read_text(
+        encoding="utf-8"
+    )
+    for kind in (
+        "command",
+        "environment",
+        "network",
+        "delete",
+        "rename",
+        "copy",
+        "create_directory",
+        "link",
+    ):
+        assert f'"{kind}"' in request_schema_text
+        candidate = copy.deepcopy(request)
+        candidate["operation"] = {
+            "type": "unsupported",
+            "kind": kind,
+            "intent_digest": "a" * 64,
+        }
+        _tool_validator("tool_request").validate(candidate)
+    for forbidden_kind in ("shell", "git", "process", "symlink", "hardlink"):
+        candidate = copy.deepcopy(request)
+        candidate["operation"] = {
+            "type": "unsupported",
+            "kind": forbidden_kind,
+            "intent_digest": "a" * 64,
+        }
+        _assert_tool_invalid("tool_request", candidate)
+    request_schema = _load(TOOL_BOUNDARY_PAIRS["tool_request"][0])
+    assert list(request_schema["$defs"]["unsupported"]["properties"]) == [
+        "type",
+        "kind",
+        "intent_digest",
+    ]
+    for forbidden_field in ("value", "url", "host_path", "payload"):
+        assert forbidden_field not in request_schema["$defs"]["unsupported"]["properties"]
+
+    receipt = _tool_sample("tool_receipt")
+    denied_codes = [
+        "invalid_binding",
+        "expired",
+        "stale_snapshot",
+        "role_forbidden",
+        "path_forbidden",
+        "unsupported_operation",
+        "payload_mismatch",
+        "limit_exceeded",
+        "workspace_invalid",
+        "protected_root",
+        "alias_forbidden",
+        "no_change",
+        "idempotency_conflict",
+    ]
+    receipt_schema_text = TOOL_BOUNDARY_PAIRS["tool_receipt"][0].read_text(
+        encoding="utf-8"
+    )
+    for code in denied_codes:
+        assert f'"{code}"' in receipt_schema_text
+        candidate = copy.deepcopy(receipt)
+        candidate["outcome"] = {"type": "denied", "code": code}
+        _tool_validator("tool_receipt").validate(candidate)
+    invalid = copy.deepcopy(receipt)
+    invalid["outcome"] = {"type": "denied", "code": "unknown"}
+    _assert_tool_invalid("tool_receipt", invalid)
+
+
+def test_tool_boundary_refs_are_local_and_duplicate_aware() -> None:
+    allowed = {path.name for path in RESOURCE_PATHS}
+    for schema_path, sample_path in TOOL_BOUNDARY_PAIRS.values():
+        schema_text = schema_path.read_text(encoding="utf-8")
+        sample_text = sample_path.read_text(encoding="utf-8")
+        refs = re.findall(r'"\$ref"\s*:\s*"([^"#]+)', schema_text)
+        assert set(refs) <= allowed
+        assert "http://" not in schema_text
+        assert schema_text.count("https://") == 1
+        assert not schema_text.startswith("\ufeff")
+        assert not sample_text.startswith("\ufeff")
+        _load(schema_path)
+        _load(sample_path)
+
+
+def test_tool_boundary_rust_surface_is_additive_opaque_and_process_free() -> None:
+    types_source = TOOL_BOUNDARY_RUST_SOURCE.read_text(encoding="utf-8")
+    runtime_source = WORKSPACE_BROKER_RUST_SOURCE.read_text(encoding="utf-8")
+    types_lib = RUST_LIB.read_text(encoding="utf-8")
+    runtime_lib = (
+        ROOT / "rust" / "ovca-runtime-core" / "src" / "lib.rs"
+    ).read_text(encoding="utf-8")
+    assert types_lib.count("pub mod tool_boundary;") == 1
+    assert "pub use tool_boundary::*;" not in types_lib
+    assert runtime_lib.count("pub mod workspace_capability;") == 1
+    for record in (
+        "WorkspaceFileV1",
+        "WorkspaceSnapshotV1",
+        "WorkspaceLeaseV1",
+        "CapabilityGrantV1",
+        "ToolRequestV1",
+        "ToolReceiptV1",
+    ):
+        assert f"pub struct {record}" in types_source
+    for opaque in (
+        "TrustedWorkspaceLease",
+        "TrustedCapabilityGrant",
+        "TrustedToolReceipt",
+    ):
+        assert f"pub struct {opaque}" in runtime_source
+    assert "fn now(&self) -> DateTime<Utc>" in runtime_source
+    assert "Command::new" not in runtime_source
+    assert "std::process" not in runtime_source
+    assert "std::net" not in runtime_source
+    assert "reqwest" not in runtime_source
+    assert "tokio" not in runtime_source
+    assert TOOL_BOUNDARY_ADR.is_file()
+
+
+def test_tool_boundary_public_hygiene_has_no_host_path_secret_or_live_endpoint() -> None:
+    paths = [
+        *(schema for schema, _ in TOOL_BOUNDARY_PAIRS.values()),
+        *(sample for _, sample in TOOL_BOUNDARY_PAIRS.values()),
+        TOOL_BOUNDARY_ADR,
+    ]
+    forbidden = re.compile(
+        r"(?i)(?:password|api[_-]?key|bearer\s|authorization:|"
+        r"(?<![a-z])[a-z]:[\\/]|"
+        r"private[_ -]?identity|production[_ -]?endpoint|"
+        r"https?://(?!json-schema\.org/))"
+    )
+    environment_value = re.compile(r"\$\{?[A-Z_][A-Z0-9_]*\}?")
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        assert forbidden.search(text) is None, path
+        assert environment_value.search(text) is None, path
+    source_forbidden = re.compile(
+        r"(?i)(?:password|api[_-]?key|bearer\s|authorization:|"
+        r"production[_ -]?endpoint|https?://)"
+    )
+    for path in (TOOL_BOUNDARY_RUST_SOURCE, WORKSPACE_BROKER_RUST_SOURCE):
+        text = path.read_text(encoding="utf-8")
+        assert source_forbidden.search(text) is None, path
         assert environment_value.search(text) is None, path

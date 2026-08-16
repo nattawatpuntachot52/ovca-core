@@ -1,0 +1,29 @@
+{
+  "contract_version": 1,
+  "request_id": "request.sample",
+  "idempotency_key": "idempotency.sample",
+  "invocation_id": "invocation.sample",
+  "invocation_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "attempt": 1,
+  "grant_id": "grant.sample",
+  "grant_digest": "b36cb40a58c965a8618322534f18f77845ee0367ed480ab4f1e9db3a69d87245",
+  "lease_id": "lease.sample",
+  "lease_digest": "9e77710ab8261cd3164f40a0e82c7ea7d871eea824df7ec6eb3d74b2793a5196",
+  "workspace_id": "workspace.sample",
+  "expected_snapshot_digest": "286f81f4be0ef63b94ad9c6bcaf2cab731bc5baab893f3bdb1475f204c799029",
+  "requester": {
+    "principal_id": "principal.sample.engineer",
+    "role": "engineer"
+  },
+  "scope": {
+    "project_id": "project.sample",
+    "goal_id": "goal.sample",
+    "task_id": "task.sample",
+    "run_id": "run.sample"
+  },
+  "operation": {
+    "type": "read_file",
+    "logical_path": "README.md"
+  },
+  "requested_at": "2026-08-17T10:09:00Z"
+}

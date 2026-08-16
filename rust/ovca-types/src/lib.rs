@@ -10,6 +10,7 @@ pub mod goal_runtime;
 pub use goal_runtime::*;
 pub mod control_plane;
 pub mod foundation;
+pub mod tool_boundary;
 
 // ── Brain ──────────────────────────────────────────────────────────────────
 

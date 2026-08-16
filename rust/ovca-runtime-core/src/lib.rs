@@ -19,6 +19,7 @@ pub mod review_audit;
 pub mod role_executor;
 pub mod scheduler;
 pub mod sqlite_execution;
+pub mod workspace_capability;
 
 pub use durable_guardrails::{
     ApprovalEnvelope, ApprovalStateCorruption, DurableApprovalError, DurableApprovalEvaluation,
@@ -54,6 +55,11 @@ pub use sqlite_execution::{
     DurableCommandResult, DurableExecutionAuthority, DurableExecutionError, ExecutionRunEnvelope,
     ExecutionStateCorruption, InitializeRunResult, LoadedExecutionRun,
     DEFAULT_EXECUTION_CAS_RETRY_LIMIT,
+};
+pub use workspace_capability::{
+    BrokerClock, CleanupReason, SystemBrokerClock, ToolExecutionResult, TrustedCapabilityGrant,
+    TrustedToolReceipt, TrustedWorkspaceLease, WorkspaceCapabilityBroker, WorkspaceCapabilityError,
+    WorkspaceLeaseState, WorkspaceSeedFile,
 };
 
 pub const LLM_CALL_CONTRACT_VERSION: &str = "oracle_llm_call_contract.v1";
