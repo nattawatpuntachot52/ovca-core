@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FoundationDecisionV1",
+  "description": "Structural wire validation only. Schema success never grants authority; every loaded value must pass the Rust FoundationDecisionV1::validate semantic validator.",
+  "x-ovca-schema-role": "structural_wire_only",
+  "x-ovca-semantic-validator": "ovca_types::foundation::FoundationDecisionV1::validate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "decision_id", "kind", "status", "namespace", "actor", "subject", "scope", "subject_digest", "evidence_ids", "decided_at"],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "decision_id": { "$ref": "#/$defs/stableId" },
+    "kind": { "enum": ["approval", "review", "audit"] },
+    "status": { "enum": ["pending", "approved", "rejected", "passed", "failed", "superseded"] },
+    "namespace": { "$ref": "#/$defs/namespace" },
+    "actor": { "$ref": "#/$defs/principalIdentity" },
+    "subject": { "$ref": "#/$defs/principalIdentity" },
+    "scope": { "$ref": "#/$defs/scope" },
+    "subject_digest": { "$ref": "#/$defs/sha256Digest" },
+    "evidence_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "x-ovca-semantic-order": "strict_ordinal_ascending", "items": { "$ref": "#/$defs/stableId" } },
+    "decided_at": { "type": "string", "format": "date-time" },
+    "supersedes_decision_id": { "$ref": "#/$defs/stableId" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["status"],
+        "properties": { "status": { "const": "superseded" } }
+      },
+      "then": { "required": ["supersedes_decision_id"] },
+      "else": { "not": { "required": ["supersedes_decision_id"] } }
+    }
+  ],
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}(?![\\s\\S])"
+    },
+    "sha256Digest": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
+    },
+    "logicalPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,127})*(?![\\s\\S])"
+    },
+    "principalIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["principal_id", "role"],
+      "properties": {
+        "principal_id": { "$ref": "#/$defs/stableId" },
+        "role": { "enum": ["owner", "coordinator", "engineer", "reviewer", "auditor"] }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id"],
+      "properties": {
+        "project_id": { "$ref": "#/$defs/stableId" },
+        "goal_id": { "$ref": "#/$defs/stableId" },
+        "task_id": { "$ref": "#/$defs/stableId" },
+        "run_id": { "$ref": "#/$defs/stableId" }
+      },
+      "allOf": [
+        { "if": { "required": ["task_id"] }, "then": { "required": ["goal_id"] } },
+        { "if": { "required": ["run_id"] }, "then": { "required": ["goal_id", "task_id"] } }
+      ]
+    },
+    "namespace": { "enum": ["code_review", "knowledge_review"] },
+    "permissionProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_version", "risk_tier", "resource_keys", "write_keys", "approval_required", "review_required", "audit_required"],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "risk_tier": { "enum": ["r0", "r1", "r2", "r3"] },
+        "resource_keys": { "type": "array", "uniqueItems": true, "x-ovca-semantic-order": "strict_ordinal_ascending", "items": { "$ref": "#/$defs/stableId" } },
+        "write_keys": { "type": "array", "uniqueItems": true, "x-ovca-semantic-order": "strict_ordinal_ascending", "items": { "$ref": "#/$defs/stableId" } },
+        "approval_required": { "type": "boolean" },
+        "review_required": { "type": "boolean" },
+        "audit_required": { "type": "boolean" }
+      }
+    },
+    "validity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "valid_from"],
+      "properties": {
+        "status": { "enum": ["pending", "active", "rejected", "stale", "revoked", "superseded"] },
+        "valid_from": { "type": "string", "format": "date-time" },
+        "valid_until": { "type": "string", "format": "date-time" }
+      }
+    },
+    "locator": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "value"],
+          "properties": { "type": { "const": "stable_id" }, "value": { "$ref": "#/$defs/stableId" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "value"],
+          "properties": { "type": { "const": "logical_path" }, "value": { "$ref": "#/$defs/logicalPath" } }
+        }
+      ]
+    }
+  }
+}

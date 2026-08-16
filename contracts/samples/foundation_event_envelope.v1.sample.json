@@ -1,0 +1,19 @@
+{
+  "contract_version": 1,
+  "event_id": "event.control.001",
+  "domain": "control_plane",
+  "scope": {
+    "project_id": "project.public",
+    "goal_id": "goal.foundation",
+    "task_id": "task.contract",
+    "run_id": "run.001"
+  },
+  "producer": {
+    "principal_id": "principal.coordinator",
+    "role": "coordinator"
+  },
+  "event_kind": "control.authority_recorded",
+  "sequence": 0,
+  "occurred_at": "2026-08-16T10:05:00Z",
+  "payload_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}

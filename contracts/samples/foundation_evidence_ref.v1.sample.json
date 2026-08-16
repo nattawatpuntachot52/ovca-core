@@ -1,0 +1,22 @@
+{
+  "contract_version": 1,
+  "evidence_id": "evidence.foundation.001",
+  "kind": "test_result",
+  "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "producer": {
+    "principal_id": "principal.engineer",
+    "role": "engineer"
+  },
+  "scope": {
+    "project_id": "project.public",
+    "goal_id": "goal.foundation",
+    "task_id": "task.contract",
+    "run_id": "run.001"
+  },
+  "namespace": "code_review",
+  "locator": {
+    "type": "logical_path",
+    "value": "contracts/samples/foundation_evidence_ref.v1.sample.json"
+  },
+  "produced_at": "2026-08-16T09:55:00Z"
+}

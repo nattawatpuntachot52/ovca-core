@@ -1,0 +1,30 @@
+{
+  "contract_version": 1,
+  "authority_id": "authority.foundation.001",
+  "principal": {
+    "principal_id": "principal.engineer",
+    "role": "engineer"
+  },
+  "scope": {
+    "project_id": "project.public",
+    "goal_id": "goal.foundation",
+    "task_id": "task.contract",
+    "run_id": "run.001"
+  },
+  "namespace": "code_review",
+  "permission_profile": {
+    "contract_version": 1,
+    "risk_tier": "r1",
+    "resource_keys": ["contracts.foundation"],
+    "write_keys": [],
+    "approval_required": true,
+    "review_required": true,
+    "audit_required": false
+  },
+  "visibility": "private",
+  "sensitivity": "internal",
+  "validity": {
+    "status": "active",
+    "valid_from": "2026-08-16T09:00:00Z"
+  }
+}
