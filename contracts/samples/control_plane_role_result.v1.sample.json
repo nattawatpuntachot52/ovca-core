@@ -1,0 +1,27 @@
+{
+  "contract_version": 1,
+  "result_id": "result.control.001",
+  "invocation_id": "invocation.control.001",
+  "invocation_digest": "9b1aa68f31606806bb34f62b14b5019f2b15926d98020a239f0a55e9268c0317",
+  "producer": {
+    "principal_id": "principal.coordinator",
+    "role": "coordinator"
+  },
+  "task_id": "task.contract",
+  "run_id": "run.001",
+  "scope": {
+    "project_id": "project.public",
+    "goal_id": "goal.control",
+    "task_id": "task.contract",
+    "run_id": "run.001"
+  },
+  "idempotency_key": "idempotency.control.001",
+  "attempt": 1,
+  "state": "completed",
+  "payload": {
+    "type": "owner_final",
+    "response": "The bounded contract task completed with cited evidence."
+  },
+  "evidence_ids": ["evidence.control.001"],
+  "occurred_at": "2026-08-16T10:02:00Z"
+}

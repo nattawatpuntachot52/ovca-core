@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExecutionBudget",
+  "description": "Structural wire validation only. Rust ExecutionBudget::validate is authoritative for semantic validation.",
+  "x-ovca-schema-role": "structural_wire_only",
+  "x-ovca-semantic-validator": "ovca_types::control_plane::ExecutionBudget::validate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "max_attempts"],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "max_attempts": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+  }
+}

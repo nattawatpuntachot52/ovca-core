@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RoleInvocationV1",
+  "description": "Structural wire validation only. Schema success is a caller assertion and never authenticates or grants authority; Rust RoleInvocationV1::validate is authoritative.",
+  "x-ovca-schema-role": "structural_wire_only",
+  "x-ovca-semantic-validator": "ovca_types::control_plane::RoleInvocationV1::validate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "invocation_id", "invoker", "target", "task_id", "run_id", "scope", "budget", "idempotency_key", "authority", "authority_digest", "input_digest", "invoked_at"],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "invocation_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "invoker": { "$ref": "foundation_authority.v1.schema.json#/$defs/principalIdentity" },
+    "target": { "$ref": "foundation_authority.v1.schema.json#/$defs/principalIdentity" },
+    "task_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "run_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "scope": { "$ref": "foundation_authority.v1.schema.json#/$defs/scope" },
+    "budget": { "$ref": "control_plane_execution_budget.v1.schema.json" },
+    "idempotency_key": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "authority": { "$ref": "foundation_authority.v1.schema.json" },
+    "authority_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "input_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "invoked_at": { "type": "string", "format": "date-time" }
+  }
+}
