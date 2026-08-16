@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 pub mod goal_runtime;
 pub use goal_runtime::*;
+pub mod control_plane;
 pub mod foundation;
 
 // ── Brain ──────────────────────────────────────────────────────────────────

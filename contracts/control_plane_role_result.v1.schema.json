@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RoleResultV1",
+  "description": "Structural wire validation only. Rust RoleResultV1::validate_against is authoritative for invocation, role, evidence, result-kind, and completion semantics.",
+  "x-ovca-schema-role": "structural_wire_only",
+  "x-ovca-semantic-validator": "ovca_types::control_plane::RoleResultV1::validate_against",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "result_id", "invocation_id", "invocation_digest", "producer", "task_id", "run_id", "scope", "idempotency_key", "attempt", "state", "payload", "evidence_ids", "occurred_at"],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "result_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "invocation_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "invocation_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "producer": { "$ref": "foundation_authority.v1.schema.json#/$defs/principalIdentity" },
+    "task_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "run_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "scope": { "$ref": "foundation_authority.v1.schema.json#/$defs/scope" },
+    "idempotency_key": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "attempt": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+    "state": { "$ref": "control_plane_state.v1.schema.json" },
+    "payload": { "$ref": "#/$defs/resultPayload" },
+    "evidence_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "x-ovca-semantic-order": "strict_ordinal_ascending",
+      "items": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" }
+    },
+    "occurred_at": { "type": "string", "format": "date-time" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "state": { "const": "completed" } }, "required": ["state"] },
+      "then": {
+        "properties": {
+          "payload": { "oneOf": [{ "$ref": "#/$defs/specialistPayload" }, { "$ref": "#/$defs/ownerFinalPayload" }] },
+          "evidence_ids": { "minItems": 1 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "state": { "const": "failed" } }, "required": ["state"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/failurePayload" } } }
+    },
+    {
+      "if": { "properties": { "state": { "const": "cancelled" } }, "required": ["state"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/cancellationPayload" } } }
+    }
+  ],
+  "$defs": {
+    "boundedText": { "type": "string", "minLength": 1, "maxLength": 4096, "x-ovca-semantic-text": "trimmed_no_controls_max_4096_unicode_scalars" },
+    "specialistPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "summary"],
+      "properties": { "type": { "const": "specialist" }, "summary": { "$ref": "#/$defs/boundedText" } }
+    },
+    "ownerFinalPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "response"],
+      "properties": { "type": { "const": "owner_final" }, "response": { "$ref": "#/$defs/boundedText" } }
+    },
+    "failurePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "code", "message"],
+      "properties": {
+        "type": { "const": "failure" },
+        "code": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "message": { "$ref": "#/$defs/boundedText" }
+      }
+    },
+    "cancellationPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "reason"],
+      "properties": { "type": { "const": "cancellation" }, "reason": { "$ref": "#/$defs/boundedText" } }
+    },
+    "resultPayload": {
+      "oneOf": [
+        { "$ref": "#/$defs/specialistPayload" },
+        { "$ref": "#/$defs/ownerFinalPayload" },
+        { "$ref": "#/$defs/failurePayload" },
+        { "$ref": "#/$defs/cancellationPayload" }
+      ]
+    }
+  }
+}

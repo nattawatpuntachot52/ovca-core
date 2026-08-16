@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ControlPlaneEvent",
+  "description": "Structural wire validation only. Rust ControlPlaneEvent::validate_against and validate_control_plane_replay are authoritative for envelope binding, transitions, attempts, time, and explicit completion.",
+  "x-ovca-schema-role": "structural_wire_only",
+  "x-ovca-semantic-validator": "ovca_types::control_plane::ControlPlaneEvent::validate_against",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "envelope", "payload"],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "envelope": { "$ref": "foundation_event_envelope.v1.schema.json" },
+    "payload": { "$ref": "#/$defs/eventPayload" }
+  },
+  "$defs": {
+    "invocationSubmitted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "invocation_id", "invocation_digest"],
+      "properties": {
+        "type": { "const": "invocation_submitted" },
+        "invocation_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "invocation_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" }
+      }
+    },
+    "attemptStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "invocation_id", "invocation_digest", "attempt"],
+      "properties": {
+        "type": { "const": "attempt_started" },
+        "invocation_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "invocation_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+        "attempt": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+      }
+    },
+    "retryScheduled": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "invocation_id", "invocation_digest", "completed_attempt", "next_attempt"],
+      "properties": {
+        "type": { "const": "retry_scheduled" },
+        "invocation_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "invocation_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+        "completed_attempt": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "next_attempt": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+      }
+    },
+    "terminalCompleted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "invocation_id", "invocation_digest", "attempt", "result_id", "result_digest"],
+      "properties": {
+        "type": { "const": "invocation_completed" },
+        "invocation_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "invocation_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+        "attempt": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "result_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "result_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" }
+      }
+    },
+    "terminalFailed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "invocation_id", "invocation_digest", "attempt", "result_id", "result_digest"],
+      "properties": {
+        "type": { "const": "invocation_failed" },
+        "invocation_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "invocation_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+        "attempt": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "result_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "result_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" }
+      }
+    },
+    "terminalCancelled": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "invocation_id", "invocation_digest", "attempt", "result_id", "result_digest"],
+      "properties": {
+        "type": { "const": "invocation_cancelled" },
+        "invocation_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "invocation_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+        "attempt": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "result_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "result_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" }
+      }
+    },
+    "eventPayload": {
+      "oneOf": [
+        { "$ref": "#/$defs/invocationSubmitted" },
+        { "$ref": "#/$defs/attemptStarted" },
+        { "$ref": "#/$defs/retryScheduled" },
+        { "$ref": "#/$defs/terminalCompleted" },
+        { "$ref": "#/$defs/terminalFailed" },
+        { "$ref": "#/$defs/terminalCancelled" }
+      ]
+    }
+  }
+}

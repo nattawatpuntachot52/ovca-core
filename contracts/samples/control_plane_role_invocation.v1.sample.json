@@ -1,0 +1,59 @@
+{
+  "contract_version": 1,
+  "invocation_id": "invocation.control.001",
+  "invoker": {
+    "principal_id": "principal.owner",
+    "role": "owner"
+  },
+  "target": {
+    "principal_id": "principal.coordinator",
+    "role": "coordinator"
+  },
+  "task_id": "task.contract",
+  "run_id": "run.001",
+  "scope": {
+    "project_id": "project.public",
+    "goal_id": "goal.control",
+    "task_id": "task.contract",
+    "run_id": "run.001"
+  },
+  "budget": {
+    "contract_version": 1,
+    "max_attempts": 2
+  },
+  "idempotency_key": "idempotency.control.001",
+  "authority": {
+    "contract_version": 1,
+    "authority_id": "authority.control.001",
+    "principal": {
+      "principal_id": "principal.owner",
+      "role": "owner"
+    },
+    "scope": {
+      "project_id": "project.public",
+      "goal_id": "goal.control",
+      "task_id": "task.contract",
+      "run_id": "run.001"
+    },
+    "namespace": "code_review",
+    "permission_profile": {
+      "contract_version": 1,
+      "risk_tier": "r1",
+      "resource_keys": ["contracts.control"],
+      "write_keys": [],
+      "approval_required": true,
+      "review_required": true,
+      "audit_required": true
+    },
+    "visibility": "private",
+    "sensitivity": "internal",
+    "validity": {
+      "status": "active",
+      "valid_from": "2026-08-16T09:00:00Z",
+      "valid_until": "2026-08-16T11:00:00Z"
+    }
+  },
+  "authority_digest": "edccdff8b163dd384a7b01191814abcf7b770c6effb59ac67a9f597152e2fba0",
+  "input_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "invoked_at": "2026-08-16T10:00:00Z"
+}

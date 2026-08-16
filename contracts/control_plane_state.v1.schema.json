@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ControlPlaneState",
+  "description": "Closed plain-string V1 state values. Rust replay validation is authoritative for transitions and completion.",
+  "x-ovca-schema-role": "structural_wire_only",
+  "x-ovca-semantic-validator": "ovca_types::control_plane::validate_control_plane_replay",
+  "type": "string",
+  "enum": ["pending", "running", "completed", "failed", "cancelled"]
+}
