@@ -16,6 +16,7 @@ pub mod guardrails;
 pub mod local_verification_completion;
 pub mod replay;
 pub mod review_audit;
+pub mod role_executor;
 pub mod scheduler;
 pub mod sqlite_execution;
 
@@ -43,6 +44,10 @@ pub use review_audit::{
     validate_review_decision, AuditDecisionValidationContext, ReviewAuditError,
     ReviewAuditEvaluationContext, ReviewAuditPolicy, ReviewDecisionValidationContext,
     ValidatedAuditDecision, ValidatedReviewDecision,
+};
+pub use role_executor::{
+    DeterministicFakeRoleExecutor, RoleExecutionOutcome, RoleExecutionRequest, RoleExecutionScript,
+    RoleExecutionUsage, RoleExecutor, RoleExecutorError, RoleRetryCause, EXECUTION_TIMEOUT_CODE,
 };
 pub use scheduler::{schedule_tasks, ScheduleError};
 pub use sqlite_execution::{
