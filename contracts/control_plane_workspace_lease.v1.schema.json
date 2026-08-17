@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WorkspaceLeaseV1",
+  "description": "Structural observation only. Rust WorkspaceLeaseV1::validate owns half-open time and digest semantics; only a live broker-issued TrustedWorkspaceLease is runtime authority.",
+  "x-ovca-schema-role": "structural_wire_only",
+  "x-ovca-semantic-validator": "ovca_types::tool_boundary::WorkspaceLeaseV1::validate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "lease_id", "workspace_id", "invocation_id", "invocation_digest", "attempt", "scope", "initial_snapshot_digest", "issued_at", "expires_at"],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "lease_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "workspace_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "invocation_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "invocation_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "attempt": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+    "scope": { "$ref": "foundation_authority.v1.schema.json#/$defs/scope" },
+    "initial_snapshot_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" }
+  }
+}

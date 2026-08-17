@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ToolReceiptV1",
+  "description": "Digest-only structural observation. Rust ToolReceiptV1 validates exact snapshot transitions; only the broker-private TrustedToolReceipt supplies process-local API provenance.",
+  "x-ovca-schema-role": "structural_wire_only",
+  "x-ovca-semantic-validator": "ovca_types::tool_boundary::ToolReceiptV1::validate and ovca_runtime_core::workspace_capability::TrustedToolReceipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "receipt_id", "runtime_instance_id", "sequence", "request_id", "request_digest", "idempotency_key", "invocation_id", "invocation_digest", "grant_id", "grant_digest", "lease_id", "lease_digest", "workspace_id", "actor", "before_snapshot_digest", "after_snapshot_digest", "before_generation", "after_generation", "outcome", "occurred_at"],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "receipt_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "runtime_instance_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "sequence": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+    "request_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "request_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "idempotency_key": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "invocation_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "invocation_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "grant_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "grant_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "lease_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "lease_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "workspace_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "actor": { "$ref": "foundation_authority.v1.schema.json#/$defs/principalIdentity" },
+    "before_snapshot_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "after_snapshot_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "before_generation": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+    "after_generation": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+    "outcome": { "$ref": "#/$defs/toolReceiptOutcome" },
+    "occurred_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "read": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "content_sha256", "byte_length"],
+      "properties": {
+        "type": { "const": "read" },
+        "content_sha256": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+        "byte_length": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
+      }
+    },
+    "written": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "content_sha256", "byte_length"],
+      "properties": {
+        "type": { "const": "written" },
+        "content_sha256": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+        "byte_length": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
+      }
+    },
+    "denied": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "code"],
+      "properties": {
+        "type": { "const": "denied" },
+        "code": { "enum": ["invalid_binding", "expired", "stale_snapshot", "role_forbidden", "path_forbidden", "unsupported_operation", "payload_mismatch", "limit_exceeded", "workspace_invalid", "protected_root", "alias_forbidden", "no_change", "idempotency_conflict"] }
+      }
+    },
+    "toolReceiptOutcome": {
+      "oneOf": [
+        { "$ref": "#/$defs/read" },
+        { "$ref": "#/$defs/written" },
+        { "$ref": "#/$defs/denied" }
+      ]
+    }
+  }
+}

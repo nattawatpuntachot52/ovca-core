@@ -1,0 +1,17 @@
+{
+  "contract_version": 1,
+  "lease_id": "lease.sample",
+  "workspace_id": "workspace.sample",
+  "invocation_id": "invocation.sample",
+  "invocation_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "attempt": 1,
+  "scope": {
+    "project_id": "project.sample",
+    "goal_id": "goal.sample",
+    "task_id": "task.sample",
+    "run_id": "run.sample"
+  },
+  "initial_snapshot_digest": "286f81f4be0ef63b94ad9c6bcaf2cab731bc5baab893f3bdb1475f204c799029",
+  "issued_at": "2026-08-17T10:02:00Z",
+  "expires_at": "2026-08-17T10:50:00Z"
+}
