@@ -872,10 +872,10 @@ fn classify_decision_projection(
                     return Err(ReviewAuditLoopError::ProjectionConflict);
                 }
             }
-            RunEventPayload::AuditDecisionRecorded { decision } => {
-                if decision != audit || event.id != *audit_event_id {
-                    return Err(ReviewAuditLoopError::ProjectionConflict);
-                }
+            RunEventPayload::AuditDecisionRecorded { decision }
+                if decision != audit || event.id != *audit_event_id =>
+            {
+                return Err(ReviewAuditLoopError::ProjectionConflict);
             }
             _ => {}
         }
