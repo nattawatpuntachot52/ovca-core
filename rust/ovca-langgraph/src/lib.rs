@@ -1,4 +1,5 @@
 // oracle-langgraph — Sprint stub. See PLAN_RUST_HOTPATH.md for full contract.
+pub mod engineer_verifier_loop;
 mod goal_runtime;
 
 pub use goal_runtime::{

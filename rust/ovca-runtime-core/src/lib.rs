@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 pub mod durable_guardrails;
+pub mod engineer_verifier;
 pub mod execution_lifecycle;
 pub mod finalization;
 pub mod guardrails;
@@ -25,6 +26,20 @@ pub use durable_guardrails::{
     ApprovalEnvelope, ApprovalStateCorruption, DurableApprovalError, DurableApprovalEvaluation,
     DurableApprovalRecord, DurableDecisionResult, DurableGuardrailAuthority, GuardedExecution,
     DEFAULT_APPROVAL_CAS_RETRY_LIMIT,
+};
+pub use engineer_verifier::{
+    denial_code, derive_phase_event_id, derive_tool_identity, ledger_entry_from_receipt,
+    ledger_entry_from_reconciliation, transition_allowed, CancellationRecordV1,
+    DerivedToolIdentityV1, DurableToolObservationV1, DurableWorkspaceAuthorityV1,
+    EngineerExecutionBindingV1, EngineerLogicalPlanV1, EngineerVerifierError,
+    EngineerVerifierPhaseProjectionV1, EngineerVerifierPhaseV1, EngineerVerifierStateV1,
+    EngineerVerifierTriggerV1, ExecutorCallStateV1, ExpectedInitialProjectionV1,
+    PendingPhaseProjectionV1, PersistedRoleExecutionOutcomeV1, PersistedRoleExecutionUsageV1,
+    PersistedRoleRetryCauseV1, PersistedVerificationTranscriptV1, PlannedToolEffectTemplateV1,
+    PreparedWriteEffectV1, ResolvedEffectLedgerEntryV1, ResolvedEffectLedgerV1,
+    ResolvedEffectResolutionV1, VerifierExecutionLimitsV1, VerifierExecutionStateV1,
+    VerifierReplayPlanV1, WorkspaceDiffBridgeV1, WorkspaceDiffPathIdentityV1,
+    WriteReconciliationV1, EMPTY_PAYLOAD_SHA256, ENGINEER_VERIFIER_CONTRACT_VERSION,
 };
 pub use execution_lifecycle::{
     CancellationRequest, ClaimRequest, CompletionRequest, ExecutionLifecycleError,
@@ -52,14 +67,16 @@ pub use role_executor::{
 };
 pub use scheduler::{schedule_tasks, ScheduleError};
 pub use sqlite_execution::{
-    DurableCommandResult, DurableExecutionAuthority, DurableExecutionError, ExecutionRunEnvelope,
-    ExecutionStateCorruption, InitializeRunResult, LoadedExecutionRun,
+    DurableCommandResult, DurableExecutionAuthority, DurableExecutionError,
+    EngineerVerifierCasOutcome, ExecutionRunEnvelope, ExecutionStateCorruption,
+    InitializeRunResult, LoadedExecutionRun, WorkspaceRecoveryClaim,
     DEFAULT_EXECUTION_CAS_RETRY_LIMIT,
 };
 pub use workspace_capability::{
-    BrokerClock, CleanupReason, SystemBrokerClock, ToolExecutionResult, TrustedCapabilityGrant,
-    TrustedToolReceipt, TrustedWorkspaceLease, WorkspaceCapabilityBroker, WorkspaceCapabilityError,
-    WorkspaceLeaseState, WorkspaceSeedFile,
+    BrokerClock, CleanupReason, PreparedWorkspaceState, SystemBrokerClock, ToolExecutionResult,
+    TrustedCapabilityGrant, TrustedSealedWorkspace, TrustedToolReceipt, TrustedWorkspaceLease,
+    WorkspaceCapabilityBroker, WorkspaceCapabilityError, WorkspaceLeaseState,
+    WorkspaceRecoveryPermit, WorkspaceSeedFile,
 };
 
 pub const LLM_CALL_CONTRACT_VERSION: &str = "oracle_llm_call_contract.v1";
