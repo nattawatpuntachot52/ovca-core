@@ -1,10 +1,16 @@
 //! Durable execution lifecycle authority backed by the versioned state store.
 
+use crate::engineer_verifier::{EngineerVerifierError, EngineerVerifierStateV1};
 use crate::execution_lifecycle::{
     CancellationRequest, ClaimRequest, CompletionRequest, ExecutionLifecycleError,
     ExecutionLifecycleKernel, ExecutionLifecycleRestoreError, ExecutionLifecycleSnapshot,
     FailureRequest, HeartbeatRequest,
 };
+use crate::workspace_capability::{
+    workspace_effect_coordinator, WorkspaceEffectCoordinator, WorkspaceEffectGuard,
+    WorkspaceRecoveryPermit,
+};
+use chrono::{DateTime, Utc};
 use ovca_storage::{
     CompareAndSwapOutcome, InitializeOutcome, VersionedState, VersionedStateError,
     VersionedStateStore,
@@ -16,6 +22,7 @@ use ovca_types::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io;
 use std::path::PathBuf;
 
 pub const DEFAULT_EXECUTION_CAS_RETRY_LIMIT: usize = 16;
@@ -28,6 +35,8 @@ pub struct ExecutionRunEnvelope {
     pub tasks: BTreeMap<TaskId, Task>,
     pub retry_budget: RetryBudget,
     pub snapshot: ExecutionLifecycleSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engineer_verifier: Option<EngineerVerifierStateV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +58,18 @@ pub struct DurableCommandResult<T> {
     pub revision: u64,
 }
 
+pub struct WorkspaceRecoveryClaim {
+    pub state: LoadedExecutionRun,
+    pub permit: WorkspaceRecoveryPermit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineerVerifierCasOutcome {
+    Applied(LoadedExecutionRun),
+    Unchanged(LoadedExecutionRun),
+    Conflict(LoadedExecutionRun),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionStateCorruption {
     UnsupportedEnvelopeVersion {
@@ -59,6 +80,7 @@ pub enum ExecutionStateCorruption {
         expected: RunId,
         actual: RunId,
     },
+    EngineerVerifier(EngineerVerifierError),
     Lifecycle(ExecutionLifecycleRestoreError),
 }
 
@@ -80,7 +102,9 @@ pub enum DurableExecutionError {
         existing_revision: u64,
     },
     Lifecycle(ExecutionLifecycleError),
+    EngineerVerifier(EngineerVerifierError),
     Storage(VersionedStateError),
+    WorkspaceCoordination(io::Error),
     Serialization(serde_json::Error),
     CorruptState {
         run_id: RunId,
@@ -105,7 +129,13 @@ impl fmt::Display for DurableExecutionError {
                 "execution run {run_id} already has a different definition at revision {existing_revision}"
             ),
             Self::Lifecycle(source) => write!(formatter, "lifecycle command rejected: {source}"),
+            Self::EngineerVerifier(source) => {
+                write!(formatter, "engineer-verifier command rejected: {source}")
+            }
             Self::Storage(source) => write!(formatter, "execution storage failed: {source}"),
+            Self::WorkspaceCoordination(source) => {
+                write!(formatter, "workspace effect coordination failed: {source}")
+            }
             Self::Serialization(source) => {
                 write!(formatter, "execution envelope serialization failed: {source}")
             }
@@ -128,7 +158,9 @@ impl std::error::Error for DurableExecutionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Lifecycle(source) => Some(source),
+            Self::EngineerVerifier(source) => Some(source),
             Self::Storage(source) => Some(source),
+            Self::WorkspaceCoordination(source) => Some(source),
             Self::Serialization(source) => Some(source),
             Self::CorruptState { source, .. } => Some(source),
             Self::RunNotFound { .. }
@@ -154,25 +186,36 @@ impl From<serde_json::Error> for DurableExecutionError {
 pub struct DurableExecutionAuthority {
     store: VersionedStateStore,
     cas_retry_limit: usize,
+    workspace_effects: WorkspaceEffectCoordinator,
 }
 
 impl DurableExecutionAuthority {
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        let store = VersionedStateStore::new(root);
+        let workspace_effects = workspace_effect_coordinator(&store.database_path());
         Self {
-            store: VersionedStateStore::new(root),
+            store,
             cas_retry_limit: DEFAULT_EXECUTION_CAS_RETRY_LIMIT,
+            workspace_effects,
         }
     }
 
     pub fn with_retry_limit(root: impl Into<PathBuf>, cas_retry_limit: usize) -> Self {
+        let store = VersionedStateStore::new(root);
+        let workspace_effects = workspace_effect_coordinator(&store.database_path());
         Self {
-            store: VersionedStateStore::new(root),
+            store,
             cas_retry_limit,
+            workspace_effects,
         }
     }
 
     pub fn database_path(&self) -> PathBuf {
         self.store.database_path()
+    }
+
+    pub(crate) fn enter_workspace_effect(&self) -> io::Result<WorkspaceEffectGuard<'_>> {
+        self.workspace_effects.enter()
     }
 
     pub fn initialize_run(
@@ -192,6 +235,7 @@ impl DurableExecutionAuthority {
                 .collect(),
             retry_budget,
             snapshot: kernel.snapshot(),
+            engineer_verifier: None,
         };
         restore_kernel(&run_id, &envelope)?;
         let payload = serde_json::to_vec(&envelope)?;
@@ -260,6 +304,186 @@ impl DurableExecutionAuthority {
         request: CancellationRequest,
     ) -> Result<DurableCommandResult<TaskTerminalRecord>, DurableExecutionError> {
         self.apply(run_id, request, ExecutionLifecycleKernel::cancel)
+    }
+
+    /// Atomically installs or replaces the optional Engineer-to-Verifier
+    /// projection in the existing execution envelope.
+    ///
+    /// The caller must supply both the exact envelope revision and the prior
+    /// state digest (or `None` for first installation). A byte-identical retry
+    /// is returned as `Unchanged`; no CAS write occurs.
+    pub fn compare_and_swap_engineer_verifier(
+        &self,
+        run_id: &RunId,
+        expected_revision: u64,
+        expected_state_digest: Option<&str>,
+        next: EngineerVerifierStateV1,
+    ) -> Result<EngineerVerifierCasOutcome, DurableExecutionError> {
+        let _effect_guard = self
+            .enter_workspace_effect()
+            .map_err(DurableExecutionError::WorkspaceCoordination)?;
+        self.compare_and_swap_engineer_verifier_unlocked(
+            run_id,
+            expected_revision,
+            expected_state_digest,
+            next,
+        )
+    }
+
+    fn compare_and_swap_engineer_verifier_unlocked(
+        &self,
+        run_id: &RunId,
+        expected_revision: u64,
+        expected_state_digest: Option<&str>,
+        next: EngineerVerifierStateV1,
+    ) -> Result<EngineerVerifierCasOutcome, DurableExecutionError> {
+        next.validate()
+            .map_err(DurableExecutionError::EngineerVerifier)?;
+        let current = self.store.load(&entity_key(run_id))?.ok_or_else(|| {
+            DurableExecutionError::RunNotFound {
+                run_id: run_id.clone(),
+            }
+        })?;
+        let loaded = decode_and_restore(run_id, current)?;
+        if loaded.revision != expected_revision
+            || loaded
+                .envelope
+                .engineer_verifier
+                .as_ref()
+                .map(|state| state.state_digest.as_str())
+                != expected_state_digest
+        {
+            return Ok(EngineerVerifierCasOutcome::Conflict(loaded));
+        }
+        validate_engineer_verifier_binding(&loaded.envelope, &next)
+            .map_err(DurableExecutionError::EngineerVerifier)?;
+        if loaded.envelope.engineer_verifier.as_ref() == Some(&next) {
+            return Ok(EngineerVerifierCasOutcome::Unchanged(loaded));
+        }
+        match loaded.envelope.engineer_verifier.as_ref() {
+            Some(previous) => previous
+                .validate_successor(&next)
+                .map_err(DurableExecutionError::EngineerVerifier)?,
+            None => next
+                .validate_initial_install()
+                .map_err(DurableExecutionError::EngineerVerifier)?,
+        }
+        let mut next_envelope = loaded.envelope;
+        next_envelope.engineer_verifier = Some(next);
+        restore_kernel(run_id, &next_envelope)?;
+        let payload = serde_json::to_vec(&next_envelope)?;
+        match self
+            .store
+            .compare_and_swap(&entity_key(run_id), expected_revision, payload)?
+        {
+            CompareAndSwapOutcome::Applied(state) => Ok(EngineerVerifierCasOutcome::Applied(
+                decode_and_restore(run_id, state)?,
+            )),
+            CompareAndSwapOutcome::Conflict(state) => Ok(EngineerVerifierCasOutcome::Conflict(
+                decode_and_restore(run_id, state)?,
+            )),
+        }
+    }
+
+    /// Fences a prior broker epoch in the execution envelope and only then
+    /// returns a private, non-Serde workspace recovery permit.
+    pub fn claim_workspace_recovery(
+        &self,
+        run_id: &RunId,
+        expected_revision: u64,
+        expected_state_digest: &str,
+        runtime_instance_id: impl Into<String>,
+        heartbeat_at: DateTime<Utc>,
+    ) -> Result<Option<WorkspaceRecoveryClaim>, DurableExecutionError> {
+        let _effect_guard = self
+            .enter_workspace_effect()
+            .map_err(DurableExecutionError::WorkspaceCoordination)?;
+        let runtime_instance_id = runtime_instance_id.into();
+        let loaded = self.load(run_id)?;
+        let Some(current) = loaded.envelope.engineer_verifier.as_ref() else {
+            return Err(DurableExecutionError::EngineerVerifier(
+                EngineerVerifierError::InvalidState,
+            ));
+        };
+        if loaded.revision != expected_revision || current.state_digest != expected_state_digest {
+            return Ok(None);
+        }
+        let mut next = current.clone();
+        let invocation = next.plan.invocation.clone();
+        let workspace = next
+            .workspace
+            .as_mut()
+            .ok_or(DurableExecutionError::EngineerVerifier(
+                EngineerVerifierError::InvalidState,
+            ))?;
+        if workspace.closed
+            || workspace.cleanup_required
+            || runtime_instance_id == workspace.runtime_instance_id
+            || heartbeat_at <= workspace.heartbeat_at
+            || !workspace.authorizes_time(&invocation, heartbeat_at)
+        {
+            return Err(DurableExecutionError::EngineerVerifier(
+                EngineerVerifierError::InvalidBinding,
+            ));
+        }
+        workspace.runtime_epoch = workspace.runtime_epoch.checked_add(1).ok_or(
+            DurableExecutionError::EngineerVerifier(EngineerVerifierError::Overflow),
+        )?;
+        workspace.fence =
+            workspace
+                .fence
+                .checked_add(1)
+                .ok_or(DurableExecutionError::EngineerVerifier(
+                    EngineerVerifierError::Overflow,
+                ))?;
+        workspace.heartbeat_at = heartbeat_at;
+        workspace.runtime_instance_id = runtime_instance_id.clone();
+        next.controller_time = heartbeat_at;
+        next.refresh_digest()
+            .map_err(DurableExecutionError::EngineerVerifier)?;
+        let outcome = self.compare_and_swap_engineer_verifier_unlocked(
+            run_id,
+            expected_revision,
+            Some(expected_state_digest),
+            next,
+        )?;
+        let EngineerVerifierCasOutcome::Applied(state) = outcome else {
+            return Ok(None);
+        };
+        let projection = state.envelope.engineer_verifier.as_ref().ok_or(
+            DurableExecutionError::EngineerVerifier(EngineerVerifierError::InvalidState),
+        )?;
+        let workspace =
+            projection
+                .workspace
+                .as_ref()
+                .ok_or(DurableExecutionError::EngineerVerifier(
+                    EngineerVerifierError::InvalidState,
+                ))?;
+        let permit = WorkspaceRecoveryPermit::try_new(
+            self.clone(),
+            run_id.clone(),
+            runtime_instance_id,
+            workspace.runtime_epoch,
+            workspace.fence,
+            workspace.recovery_token.clone(),
+            crate::RoleExecutionRequest {
+                invocation: projection.plan.invocation.clone(),
+                attempt: projection.attempt,
+            },
+            workspace.lease.clone(),
+            workspace.lease_digest.clone(),
+            workspace.initial_snapshot.clone(),
+            workspace.current_snapshot.clone(),
+            projection.prepared_write.clone(),
+            workspace.grant.clone(),
+            workspace.grant_digest.clone(),
+            workspace.next_receipt_sequence,
+        )
+        .map_err(|_| {
+            DurableExecutionError::EngineerVerifier(EngineerVerifierError::InvalidBinding)
+        })?;
+        Ok(Some(WorkspaceRecoveryClaim { state, permit }))
     }
 
     fn apply<Request, Output>(
@@ -371,6 +595,20 @@ fn restore_kernel(
             },
         ));
     }
+    if let Some(state) = &envelope.engineer_verifier {
+        state.validate().map_err(|source| {
+            corrupt(
+                expected_run_id,
+                ExecutionStateCorruption::EngineerVerifier(source),
+            )
+        })?;
+        validate_engineer_verifier_binding(envelope, state).map_err(|source| {
+            corrupt(
+                expected_run_id,
+                ExecutionStateCorruption::EngineerVerifier(source),
+            )
+        })?;
+    }
     ExecutionLifecycleKernel::restore(
         envelope.run_id.clone(),
         envelope.tasks.values().cloned().collect(),
@@ -378,6 +616,25 @@ fn restore_kernel(
         envelope.snapshot.clone(),
     )
     .map_err(|source| corrupt(expected_run_id, ExecutionStateCorruption::Lifecycle(source)))
+}
+
+fn validate_engineer_verifier_binding(
+    envelope: &ExecutionRunEnvelope,
+    state: &EngineerVerifierStateV1,
+) -> Result<(), EngineerVerifierError> {
+    let task = envelope
+        .tasks
+        .get(&state.task_id)
+        .ok_or(EngineerVerifierError::InvalidBinding)?;
+    if state.run_id != envelope.run_id
+        || state.plan.run_id != envelope.run_id
+        || state.goal_id != task.goal_id
+        || state.plan.goal_id != task.goal_id
+        || state.plan.invocation.budget.max_attempts != envelope.retry_budget.max_attempts
+    {
+        return Err(EngineerVerifierError::InvalidBinding);
+    }
+    Ok(())
 }
 
 fn corrupt(run_id: &RunId, source: ExecutionStateCorruption) -> DurableExecutionError {
