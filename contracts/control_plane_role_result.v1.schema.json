@@ -33,7 +33,7 @@
       "if": { "properties": { "state": { "const": "completed" } }, "required": ["state"] },
       "then": {
         "properties": {
-          "payload": { "oneOf": [{ "$ref": "#/$defs/specialistPayload" }, { "$ref": "#/$defs/ownerFinalPayload" }] },
+          "payload": { "oneOf": [{ "$ref": "#/$defs/specialistPayload" }, { "$ref": "#/$defs/ownerFinalPayload" }, { "$ref": "#/$defs/reviewerPayload" }, { "$ref": "#/$defs/auditorPayload" }] },
           "evidence_ids": { "minItems": 1 }
         }
       }
@@ -61,6 +61,43 @@
       "required": ["type", "response"],
       "properties": { "type": { "const": "owner_final" }, "response": { "$ref": "#/$defs/boundedText" } }
     },
+    "reviewerPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "packet_digest", "decision"],
+      "properties": {
+        "type": { "const": "reviewer" },
+        "packet_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+        "decision": { "$ref": "audit_packet.v1.schema.json#/$defs/reviewDecision" }
+      }
+    },
+    "auditorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "packet_digest", "decision"],
+      "properties": {
+        "type": { "const": "auditor" },
+        "packet_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+        "decision": { "$ref": "#/$defs/auditDecision" }
+      }
+    },
+    "auditDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_version", "id", "run_id", "goal_id", "review_decision_id", "producer_role", "verdict", "assessments", "summary", "decided_at"],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "run_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "goal_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "review_decision_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "producer_role": { "const": "auditor" },
+        "verdict": { "enum": ["pass", "fail"] },
+        "assessments": { "type": "array", "minItems": 1, "items": { "$ref": "audit_packet.v1.schema.json#/$defs/assessment" } },
+        "summary": { "$ref": "#/$defs/boundedText" },
+        "decided_at": { "type": "string", "format": "date-time" }
+      }
+    },
     "failurePayload": {
       "type": "object",
       "additionalProperties": false,
@@ -81,6 +118,8 @@
       "oneOf": [
         { "$ref": "#/$defs/specialistPayload" },
         { "$ref": "#/$defs/ownerFinalPayload" },
+        { "$ref": "#/$defs/reviewerPayload" },
+        { "$ref": "#/$defs/auditorPayload" },
         { "$ref": "#/$defs/failurePayload" },
         { "$ref": "#/$defs/cancellationPayload" }
       ]

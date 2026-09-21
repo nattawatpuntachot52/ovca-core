@@ -1,0 +1,31 @@
+{
+  "contract_version": 1,
+  "directive_id": "directive.a05.repair",
+  "root_run_id": "run.a05",
+  "failed_run_id": "run.a05",
+  "successor_run_id": "repair.1.aef6ed3b979eee5dccecaf157cf503177c4e388de12d29567c1cece8eb71b3db",
+  "goal_id": "goal.a05",
+  "task_id": "task.a05",
+  "failed_candidate_cycle": 0,
+  "successor_candidate_cycle": 1,
+  "max_repair_cycles": 2,
+  "review_packet_digest": "3c657e271aa49f89f8255caf39141ee2cff2ecd50c2bfdb33de3789008371040",
+  "review_result_digest": "a5486347f1cc9743561b79d426bcce5b773c496e3ab6d560d05f97b0f2149059",
+  "audit_packet_digest": "e68f8fe9db3a4ad5e654f3ffadf7f1c8ca25d1aaf235ed1b96d83733215fd9b2",
+  "audit_result_digest": "28dd097e2522c5527425f41309db6d6c9147e9dce6fcff32456bd9aecd25915b",
+  "repair_paths": [
+    "input.txt"
+  ],
+  "unsatisfied_criteria": [
+    {
+      "kind": "acceptance",
+      "criterion": "candidate is correct"
+    }
+  ],
+  "routed_by": {
+    "principal_id": "principal.a05.coordinator",
+    "role": "coordinator"
+  },
+  "grants_authority": false,
+  "directive_digest": "ffcb84ec15aaaf7729991947f010ac09973987db480660358b8eba972739eb77"
+}

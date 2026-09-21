@@ -1,3 +1,4 @@
+use crate::engineer_verifier_loop::has_authentic_engineer_verifier_phase_projection;
 use chrono::{DateTime, Utc};
 use ovca_observability::{
     evaluate_goal_runtime, guard_authority_projection, GoalRuntimeEvaluation,
@@ -8,12 +9,17 @@ use ovca_runtime_core::{
     replay_run, schedule_tasks, validate_local_verification_completion_contract,
     validate_persisted_completion_material, DurableApprovalError, DurableApprovalEvaluation,
     DurableApprovalRecord, DurableDecisionResult, DurableExecutionAuthority, DurableExecutionError,
-    DurableGuardrailAuthority, GuardEvaluationContext, GuardedExecution, InitializeRunResult,
-    LoadedExecutionRun, LocalVerificationCompletionContract, LocalVerificationCompletionError,
-    LocalVerificationObservation, ReplayError, ReplayedRun, ScheduleError,
-    VerifiedCompletionMaterial, DEFAULT_APPROVAL_CAS_RETRY_LIMIT,
+    DurableGuardrailAuthority, GuardEvaluationContext, GuardedExecution, IndependentCallStateV1,
+    IndependentReviewPhaseV1, InitializeRunResult, LoadedExecutionRun,
+    LocalVerificationCompletionContract, LocalVerificationCompletionError,
+    LocalVerificationObservation, PersistedRoleExecutionOutcomeV1, ReplayError, ReplayedRun,
+    ScheduleError, VerifiedCompletionMaterial, DEFAULT_APPROVAL_CAS_RETRY_LIMIT,
 };
-use ovca_storage::{EvidenceBank, LocalVerificationStoreError, RunEventLog, RunEventLogError};
+use ovca_storage::{
+    CompletionAdmissionSnapshot, EvidenceBank, EvidenceKey, LocalVerificationStoreError,
+    RunEventLog, RunEventLogError,
+};
+use ovca_types::control_plane::RoleResultPayloadV1;
 use ovca_types::{
     ApprovalDecisionRecord, ApprovalRequestId, CompletionAppendReconciliation, ContractVersion,
     EventId, ExecutionPlan, GoalContract, GoalId, GuardRequest, RetryBudget, Role, RunEvent,
@@ -238,6 +244,12 @@ pub enum DurableGoalRuntimeError {
     CompletionEnvironmentUnavailable {
         task_id: TaskId,
     },
+    IndependentReviewCompletionRequired {
+        run_id: RunId,
+    },
+    IndependentReviewCompletionInvalid {
+        run_id: RunId,
+    },
     BootstrapRunStatusMismatch {
         expected: RunStatus,
         found: RunStatus,
@@ -332,6 +344,14 @@ impl fmt::Display for DurableGoalRuntimeError {
                 formatter,
                 "declared environment bindings are unavailable for completion task {task_id}"
             ),
+            Self::IndependentReviewCompletionRequired { run_id } => write!(
+                formatter,
+                "Issue 6 managed run {run_id} requires an exact resolved A05 pass"
+            ),
+            Self::IndependentReviewCompletionInvalid { run_id } => write!(
+                formatter,
+                "Issue 6 managed run {run_id} has an invalid or stale A05 completion anchor"
+            ),
             Self::BootstrapRunStatusMismatch { expected, found } => write!(
                 formatter,
                 "execution bootstrap requires orchestration status {expected}, found {found}"
@@ -400,6 +420,8 @@ impl std::error::Error for DurableGoalRuntimeError {
             | Self::VerifiedCompletionNotRequired { .. }
             | Self::InvalidVerifiedCompletionEvent
             | Self::CompletionAppendEventConflict { .. }
+            | Self::IndependentReviewCompletionRequired { .. }
+            | Self::IndependentReviewCompletionInvalid { .. }
             | Self::CompletionEnvironmentUnavailable { .. } => None,
         }
     }
@@ -527,6 +549,7 @@ fn is_local_absolute_source_root(root: &Path) -> bool {
 /// assignment and event-producer identities remain the role-only [`Role`] surface.
 #[derive(Debug, Clone)]
 pub struct DurableGoalRuntime {
+    root: PathBuf,
     log: RunEventLog,
     execution: DurableExecutionAuthority,
     guardrails: DurableGuardrailAuthority,
@@ -540,6 +563,7 @@ impl DurableGoalRuntime {
     pub fn new(root: impl AsRef<Path>) -> Self {
         let root = root.as_ref();
         Self {
+            root: root.to_path_buf(),
             log: RunEventLog::new(root),
             execution: DurableExecutionAuthority::new(root),
             guardrails: DurableGuardrailAuthority::new(root, DEFAULT_APPROVAL_CAS_RETRY_LIMIT),
@@ -565,6 +589,7 @@ impl DurableGoalRuntime {
             }
         };
         Ok(Self {
+            root: root.to_path_buf(),
             log: RunEventLog::new(root),
             execution: DurableExecutionAuthority::new(root),
             guardrails: DurableGuardrailAuthority::new(root, DEFAULT_APPROVAL_CAS_RETRY_LIMIT),
@@ -780,6 +805,160 @@ impl DurableGoalRuntime {
         validate_runtime_view(orchestration, execution)
     }
 
+    fn independent_review_evidence_key(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<EvidenceKey>, DurableGoalRuntimeError> {
+        let Some(loaded) = self.load_issue6_execution_if_present(run_id)? else {
+            return Ok(None);
+        };
+        let state = loaded.envelope.independent_review.as_ref().ok_or_else(|| {
+            DurableGoalRuntimeError::IndependentReviewCompletionRequired {
+                run_id: run_id.clone(),
+            }
+        })?;
+        Ok(Some(EvidenceKey {
+            run_id: state.review_packet.run_id.clone(),
+            goal_id: state.review_packet.goal_id.clone(),
+            task_id: state.review_packet.task_id.clone(),
+        }))
+    }
+
+    fn load_issue6_execution_if_present(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<LoadedExecutionRun>, DurableGoalRuntimeError> {
+        let projected = has_authentic_engineer_verifier_phase_projection(&self.log, run_id)
+            .map_err(
+                |_| DurableGoalRuntimeError::IndependentReviewCompletionInvalid {
+                    run_id: run_id.clone(),
+                },
+            )?;
+        let missing = || DurableGoalRuntimeError::IndependentReviewCompletionInvalid {
+            run_id: run_id.clone(),
+        };
+        if !self.execution.database_path().exists() {
+            return if projected { Err(missing()) } else { Ok(None) };
+        }
+        let loaded = match self.execution.load(run_id) {
+            Ok(value) => value,
+            Err(DurableExecutionError::RunNotFound { .. }) if projected => return Err(missing()),
+            Err(DurableExecutionError::RunNotFound { .. }) => return Ok(None),
+            Err(source) => return Err(DurableGoalRuntimeError::Execution { source }),
+        };
+        if loaded.envelope.engineer_verifier.is_none() {
+            return if projected { Err(missing()) } else { Ok(None) };
+        }
+        Ok(Some(loaded))
+    }
+
+    fn validate_independent_completion_snapshot(
+        &self,
+        run_id: &RunId,
+        replayed: &ReplayedRun,
+        snapshot: &CompletionAdmissionSnapshot,
+    ) -> Result<(), DurableGoalRuntimeError> {
+        let Some(loaded) = self.load_issue6_execution_if_present(run_id)? else {
+            return Ok(());
+        };
+        let issue6 = loaded.envelope.engineer_verifier.as_ref().ok_or_else(|| {
+            DurableGoalRuntimeError::IndependentReviewCompletionInvalid {
+                run_id: run_id.clone(),
+            }
+        })?;
+        let state = loaded.envelope.independent_review.as_ref().ok_or_else(|| {
+            DurableGoalRuntimeError::IndependentReviewCompletionRequired {
+                run_id: run_id.clone(),
+            }
+        })?;
+        let packet = &state.review_packet;
+        let invalid = || DurableGoalRuntimeError::IndependentReviewCompletionInvalid {
+            run_id: run_id.clone(),
+        };
+        if state.phase != IndependentReviewPhaseV1::ResolvedPass
+            || packet.issue6_state_digest != issue6.state_digest
+        {
+            return Err(invalid());
+        }
+        let Some(ovca_runtime_core::IndependentReviewResolutionV1::Pass {
+            review_result_digest,
+            audit_result_digest,
+        }) = state.resolution.as_ref()
+        else {
+            return Err(invalid());
+        };
+        let IndependentCallStateV1::OutcomeRecorded {
+            outcome: review_outcome,
+            ..
+        } = &state.review_call
+        else {
+            return Err(invalid());
+        };
+        let PersistedRoleExecutionOutcomeV1::Completed {
+            result: review_result,
+            ..
+        } = review_outcome.as_ref()
+        else {
+            return Err(invalid());
+        };
+        let Some(IndependentCallStateV1::OutcomeRecorded {
+            outcome: audit_outcome,
+            ..
+        }) = state.audit_call.as_ref()
+        else {
+            return Err(invalid());
+        };
+        let PersistedRoleExecutionOutcomeV1::Completed {
+            result: audit_result,
+            ..
+        } = audit_outcome.as_ref()
+        else {
+            return Err(invalid());
+        };
+        let RoleResultPayloadV1::Reviewer {
+            decision: review_decision,
+            ..
+        } = &review_result.payload
+        else {
+            return Err(invalid());
+        };
+        let RoleResultPayloadV1::Auditor {
+            decision: audit_decision,
+            ..
+        } = &audit_result.payload
+        else {
+            return Err(invalid());
+        };
+        if review_decision.verdict != ovca_types::ReviewVerdict::Pass
+            || audit_decision.verdict != ovca_types::ReviewVerdict::Pass
+            || review_result.canonical_digest().ok().as_ref() != Some(review_result_digest)
+            || audit_result.canonical_digest().ok().as_ref() != Some(audit_result_digest)
+            || replayed.review_decisions.as_slice() != [review_decision.clone()]
+            || replayed.audit_decisions.as_slice() != [audit_decision.clone()]
+        {
+            return Err(invalid());
+        }
+        let current = snapshot
+            .bundles
+            .iter()
+            .find(|candidate| {
+                candidate.current.key.run_id == packet.run_id
+                    && candidate.current.key.goal_id == packet.goal_id
+                    && candidate.current.key.task_id == packet.task_id
+            })
+            .ok_or_else(invalid)?;
+        if current.current.bundle_id != packet.evidence_current.bundle_id
+            || current.current.record_digest != packet.evidence_current.record_digest
+            || current.current.token.generation != packet.evidence_current.generation
+            || current.current.token.state_digest != packet.evidence_current.state_digest
+            || current.record.digest != packet.verification_bundle_record_digest
+            || current.record.bundle != packet.verification_bundle
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+
     fn authoritative_completion_goal<'a>(
         &'a self,
         events: &[RunEvent],
@@ -940,6 +1119,7 @@ impl DurableGoalRuntime {
         if events.is_empty() {
             return Err(DurableGoalRuntimeError::RunNotFound { run_id });
         }
+        self.load_issue6_execution_if_present(&event.run_id)?;
         let authority = self
             .authoritative_completion_goal(&events, goal)?
             .ok_or_else(|| DurableGoalRuntimeError::VerifiedCompletionNotRequired {
@@ -982,6 +1162,7 @@ impl DurableGoalRuntime {
                 &current.evidence_references,
                 current.completion_evidence.as_ref(),
             )?;
+            self.validate_independent_completion_snapshot(&event.run_id, &current, snapshot)?;
 
             current_events.push(event.clone());
             replay_run(&current_events, Some(&current_authority.completion.goal))
@@ -1016,6 +1197,7 @@ impl DurableGoalRuntime {
                 run_id: event.run_id.clone(),
             });
         }
+        self.load_issue6_execution_if_present(&event.run_id)?;
         let authority = self
             .authoritative_completion_goal(&events, goal)?
             .ok_or_else(|| DurableGoalRuntimeError::VerifiedCompletionNotRequired {
@@ -1026,11 +1208,24 @@ impl DurableGoalRuntime {
                 goal_id: authority.completion.goal.id.clone(),
             });
         }
-        replay_run(&events, Some(&authority.completion.goal))
+        let current = replay_run(&events, Some(&authority.completion.goal))
             .map_err(|source| DurableGoalRuntimeError::Replay { source })?;
 
         if let Some(committed) = events.iter().find(|value| value.id == event.id) {
             if committed == event {
+                if let Some(key) = self.independent_review_evidence_key(&event.run_id)? {
+                    let bank = EvidenceBank::try_new(&self.root)?;
+                    bank.with_completion_admission_lease(
+                        &[key],
+                        |snapshot| -> Result<(), DurableGoalRuntimeError> {
+                            self.validate_independent_completion_snapshot(
+                                &event.run_id,
+                                &current,
+                                snapshot,
+                            )
+                        },
+                    )?;
+                }
                 return Ok(CompletionAppendReconciliation::AlreadyCommitted);
             }
             return Err(DurableGoalRuntimeError::CompletionAppendEventConflict {
@@ -1042,6 +1237,15 @@ impl DurableGoalRuntime {
         prospective.push(event.clone());
         replay_run(&prospective, Some(&authority.completion.goal))
             .map_err(|source| DurableGoalRuntimeError::Replay { source })?;
+        if let Some(key) = self.independent_review_evidence_key(&event.run_id)? {
+            let bank = EvidenceBank::try_new(&self.root)?;
+            bank.with_completion_admission_lease(
+                &[key],
+                |snapshot| -> Result<(), DurableGoalRuntimeError> {
+                    self.validate_independent_completion_snapshot(&event.run_id, &current, snapshot)
+                },
+            )?;
+        }
         Ok(CompletionAppendReconciliation::RetryRequired)
     }
 
@@ -1065,12 +1269,31 @@ impl DurableGoalRuntime {
         }
 
         if is_completed_transition(&event.payload) {
+            self.load_issue6_execution_if_present(&run_id)?;
             if let Some(authority) = self.authoritative_completion_goal(&prospective, goal)? {
                 if requires_local_verification(&authority.completion.goal) {
                     return Err(DurableGoalRuntimeError::VerifiedCompletionRequired {
                         goal_id: authority.completion.goal.id.clone(),
                     });
                 }
+            }
+            if let Some(key) = self.independent_review_evidence_key(&run_id)? {
+                let bank = EvidenceBank::try_new(&self.root)?;
+                bank.with_completion_admission_lease(
+                    &[key],
+                    |snapshot| -> Result<(), DurableGoalRuntimeError> {
+                        let mut current_events = self.log.load_run(&run_id)?;
+                        let current = replay_run(&current_events, Some(goal))
+                            .map_err(|source| DurableGoalRuntimeError::Replay { source })?;
+                        self.validate_independent_completion_snapshot(&run_id, &current, snapshot)?;
+                        current_events.push(event.clone());
+                        replay_run(&current_events, Some(goal))
+                            .map_err(|source| DurableGoalRuntimeError::Replay { source })?;
+                        self.log.append(&event)?;
+                        Ok(())
+                    },
+                )?;
+                return self.load_run(&run_id, goal);
             }
         }
 
@@ -3223,6 +3446,7 @@ mod tests {
         let fixture = v4c_fixture();
         let before = fs::read(fixture.runtime.log_path()).unwrap();
         let missing = DurableGoalRuntime {
+            root: fixture._durable.path().to_path_buf(),
             log: fixture.runtime.log.clone(),
             execution: fixture.runtime.execution.clone(),
             guardrails: fixture.runtime.guardrails.clone(),
@@ -3252,6 +3476,7 @@ mod tests {
             task_id: TaskId::from("task-b"),
         };
         let mismatch = DurableGoalRuntime {
+            root: fixture._durable.path().to_path_buf(),
             log: fixture.runtime.log.clone(),
             execution: fixture.runtime.execution.clone(),
             guardrails: fixture.runtime.guardrails.clone(),

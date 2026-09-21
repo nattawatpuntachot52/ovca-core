@@ -2716,6 +2716,24 @@ fn validate_phase_event(
     Ok(Some(projection))
 }
 
+pub(crate) fn has_authentic_engineer_verifier_phase_projection(
+    log: &RunEventLog,
+    run_id: &ovca_types::RunId,
+) -> Result<bool, EngineerVerifierLoopError> {
+    let rows = raw_event_rows(log)?;
+    let run = rows
+        .iter()
+        .filter(|row| &row.event.run_id == run_id)
+        .collect::<Vec<_>>();
+    validate_run_chain(&run)?;
+    for row in run {
+        if validate_phase_event(&row.event)?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn validate_run_chain(run: &[&RawEventRow]) -> Result<(), EngineerVerifierLoopError> {
     for (index, row) in run.iter().enumerate() {
         let sequence = u64::try_from(index).map_err(|_| EngineerVerifierLoopError::InvalidInput)?;
@@ -2729,6 +2747,137 @@ fn validate_run_chain(run: &[&RawEventRow]) -> Result<(), EngineerVerifierLoopEr
         }
     }
     Ok(())
+}
+
+pub(crate) fn validate_terminal_reviewing_projection_chain(
+    log: &RunEventLog,
+    state: &EngineerVerifierStateV1,
+) -> Result<Vec<RunEvent>, EngineerVerifierLoopError> {
+    state.validate()?;
+    if state.phase != EngineerVerifierPhaseV1::Reviewing || state.pending_projection.is_some() {
+        return Err(EngineerVerifierLoopError::ProjectionConflict);
+    }
+    let projected_sequence = state
+        .projected_sequence
+        .ok_or(EngineerVerifierLoopError::ProjectionConflict)?;
+    let projected_event_id = state
+        .projected_event_id
+        .as_deref()
+        .ok_or(EngineerVerifierLoopError::ProjectionConflict)?;
+
+    let rows = raw_event_rows(log)?;
+    let run_rows = rows
+        .iter()
+        .filter(|row| row.event.run_id == state.run_id)
+        .collect::<Vec<_>>();
+    let mut event_ids = BTreeSet::new();
+    if run_rows.iter().any(|row| {
+        row.event.contract_version != ContractVersion::current()
+            || row.event.run_id != state.run_id
+            || !event_ids.insert(row.event.id.clone())
+    }) {
+        return Err(EngineerVerifierLoopError::ProjectionConflict);
+    }
+    validate_run_chain(&run_rows)?;
+    let projected_index =
+        usize::try_from(projected_sequence).map_err(|_| EngineerVerifierLoopError::InvalidInput)?;
+    let terminal = run_rows
+        .get(projected_index)
+        .ok_or(EngineerVerifierLoopError::ProjectionConflict)?;
+    if terminal.event.id.as_str() != projected_event_id {
+        return Err(EngineerVerifierLoopError::ProjectionConflict);
+    }
+
+    let prefix = &run_rows[..=projected_index];
+    let first_phase_index = match &prefix[0].event.payload {
+        RunEventPayload::RunCreated {
+            goal_id, task_ids, ..
+        } if goal_id == &state.goal_id && task_ids.contains(&state.task_id) => {
+            let events = prefix
+                .iter()
+                .map(|row| row.event.clone())
+                .collect::<Vec<_>>();
+            ovca_runtime_core::validate_event_chain(&events)
+                .map_err(|_| EngineerVerifierLoopError::ProjectionConflict)?;
+            prefix
+                .iter()
+                .position(|row| validate_phase_event(&row.event).ok().flatten().is_some())
+                .ok_or(EngineerVerifierLoopError::ProjectionConflict)?
+        }
+        _ => 0,
+    };
+
+    let phase_rows = &prefix[first_phase_index..];
+    let mut projections = Vec::with_capacity(phase_rows.len());
+    for row in phase_rows {
+        projections.push(
+            validate_phase_event(&row.event)?
+                .ok_or(EngineerVerifierLoopError::ProjectionConflict)?,
+        );
+    }
+    let Some(first) = projections.first() else {
+        return Err(EngineerVerifierLoopError::ProjectionConflict);
+    };
+    if first.from != EngineerVerifierPhaseV1::Planned
+        || first.to != EngineerVerifierPhaseV1::Engineering
+        || first.trigger != EngineerVerifierTriggerV1::ClaimAccepted
+        || first.phase_revision != 1
+        || first.attempt != 1
+        || first.run_id != state.run_id
+        || first.goal_id != state.goal_id
+        || first.task_id != state.task_id
+        || first.execution_binding_digest != state.execution_binding.execution_binding_digest
+        || first.logical_plan_digest != state.plan.logical_plan_digest
+    {
+        return Err(EngineerVerifierLoopError::ProjectionConflict);
+    }
+    for pair in projections.windows(2) {
+        let prior = &pair[0];
+        let next = &pair[1];
+        let expected_attempt = if next.trigger == EngineerVerifierTriggerV1::RetryClaimAccepted {
+            prior
+                .attempt
+                .checked_add(1)
+                .ok_or(EngineerVerifierLoopError::InvalidInput)?
+        } else {
+            prior.attempt
+        };
+        if next.phase_revision
+            != prior
+                .phase_revision
+                .checked_add(1)
+                .ok_or(EngineerVerifierLoopError::InvalidInput)?
+            || next.from != prior.to
+            || next.controller_time < prior.controller_time
+            || next.attempt != expected_attempt
+            || next.execution_binding_digest != prior.execution_binding_digest
+            || next.logical_plan_digest != prior.logical_plan_digest
+        {
+            return Err(EngineerVerifierLoopError::ProjectionConflict);
+        }
+    }
+    let final_projection = projections
+        .last()
+        .ok_or(EngineerVerifierLoopError::ProjectionConflict)?;
+    if final_projection.to != EngineerVerifierPhaseV1::Reviewing
+        || final_projection.phase_revision != state.phase_revision
+        || final_projection.attempt != state.attempt
+        || final_projection.state_digest != state.state_digest
+        || final_projection.resolved_effect_ledger_digest
+            != state.ledger.resolved_effect_ledger_digest
+        || final_projection.engineer_result_digest != state.engineer_result_digest
+        || final_projection.verifier_transcript_digest
+            != state
+                .verifier
+                .as_ref()
+                .and_then(VerifierExecutionStateV1::transcript_digest)
+                .map(str::to_owned)
+        || final_projection.controller_time != state.controller_time
+    {
+        return Err(EngineerVerifierLoopError::ProjectionConflict);
+    }
+
+    Ok(run_rows.into_iter().map(|row| row.event.clone()).collect())
 }
 
 fn current_run_cursor(
