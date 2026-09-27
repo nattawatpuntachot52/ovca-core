@@ -5,6 +5,7 @@ use ovca_llm_client::{
 };
 use ovca_mcp::init_tracing;
 use ovca_mcp::server::{BoxFuture, McpServer};
+use ovca_runtime_core::{classify_intent, intent_to_agent, resolve_requested_agent};
 use ovca_storage::write_json_atomic;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
@@ -56,11 +57,7 @@ fn contains_any(text: &str, patterns: &[&str]) -> bool {
     patterns.iter().any(|pattern| text.contains(pattern))
 }
 
-fn classify_divergence_policy(
-    text: &str,
-    intent: &str,
-    route_target: &str,
-) -> (&'static str, &'static str) {
+fn classify_divergence_policy(text: &str) -> (&'static str, &'static str) {
     let lowered = text.to_ascii_lowercase();
 
     let cross_domain_conflict = contains_any(
@@ -192,7 +189,6 @@ fn classify_divergence_policy(
         return ("recommended", "strategy_tradeoff");
     }
 
-    let _ = (route_target, intent);
     ("exempt", "")
 }
 
@@ -427,14 +423,7 @@ fn oracle_diverge(root: &Path, args: Value) -> Value {
     }
 
     let classification_text = format!("{objective}\n{prompt}");
-    let intent = classify_intent(&classification_text);
-    let route_target = match domain {
-        "research" => "auditor",
-        "engineering" => "engineer",
-        _ => intent_to_agent(&intent),
-    };
-    let (policy_mode, policy_reason) =
-        classify_divergence_policy(&classification_text, &intent, route_target);
+    let (policy_mode, policy_reason) = classify_divergence_policy(&classification_text);
 
     if policy_mode == "exempt" {
         let mut output = build_diverge_error(
@@ -806,122 +795,6 @@ fn oracle_diverge(root: &Path, args: Value) -> Value {
     output
 }
 
-fn tokenize(text: &str) -> HashSet<String> {
-    let mut tokens = HashSet::new();
-    let mut current = String::new();
-
-    for ch in text.chars() {
-        let is_token =
-            ch.is_ascii_alphanumeric() || ch == '_' || ('\u{0E00}'..='\u{0E7F}').contains(&ch);
-        if is_token {
-            for lower in ch.to_lowercase() {
-                current.push(lower);
-            }
-        } else if !current.is_empty() {
-            tokens.insert(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        tokens.insert(current);
-    }
-
-    tokens
-}
-
-fn intent_keywords() -> [(&'static str, &'static [&'static str]); 4] {
-    [
-        (
-            "intel",
-            &[
-                "market",
-                "macro",
-                "geopolitics",
-                "fed",
-                "inflation",
-                "rate",
-                "regime",
-                "stocks",
-                "equity",
-                "crypto",
-                "gold",
-                "oil",
-            ],
-        ),
-        (
-            "research",
-            &[
-                "hypothesis",
-                "backtest",
-                "strategy",
-                "edge",
-                "research",
-                "statistical",
-                "correlation",
-                "robustness",
-            ],
-        ),
-        (
-            "trading",
-            &[
-                "trade",
-                "position",
-                "risk",
-                "entry",
-                "exit",
-                "drawdown",
-                "execution",
-                "order",
-                "stop",
-                "hedge",
-                "portfolio",
-            ],
-        ),
-        (
-            "engineering",
-            &[
-                "script", "code", "bug", "automate", "api", "python", "rust", "fix", "error",
-                "pipeline",
-            ],
-        ),
-    ]
-}
-
-fn classify_intent(text: &str) -> String {
-    let lowered = text.to_ascii_lowercase();
-    let tokens = tokenize(&lowered);
-    for (intent, keywords) in intent_keywords() {
-        if keywords.iter().any(|keyword| {
-            keyword
-                .chars()
-                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
-                && tokens.contains(*keyword)
-                || lowered.contains(keyword)
-        }) {
-            return intent.to_string();
-        }
-    }
-    "general".to_string()
-}
-
-fn intent_to_agent(intent: &str) -> &'static str {
-    match intent {
-        "intel" => "reviewer",
-        "research" => "auditor",
-        "trading" => "coordinator",
-        "engineering" => "engineer",
-        _ => "coordinator",
-    }
-}
-
-fn resolve_requested_agent(raw: &str) -> String {
-    let normalized = raw.trim().to_ascii_lowercase();
-    if SPECIALISTS.contains(&normalized.as_str()) || normalized == "coordinator" {
-        normalized
-    } else {
-        String::new()
-    }
-}
-
 fn read_signals(root: &Path) -> BTreeMap<String, Value> {
     let mut latest = BTreeMap::new();
     for row in load_jsonl_values(&signals_path(root)) {
@@ -1064,25 +937,20 @@ fn route_intake(args: Value) -> Value {
             .unwrap_or(""),
     );
     let intent = classify_intent(&user_text);
-    let route_target = if requested_agent.is_empty() {
-        intent_to_agent(&intent).to_string()
-    } else {
-        requested_agent.clone()
-    };
-    let reason = if requested_agent.is_empty() {
-        format!("intent:{}", intent)
+    let route_target = requested_agent.unwrap_or_else(|| intent_to_agent(intent));
+    let reason = if requested_agent.is_none() {
+        format!("intent:{}", intent.as_str())
     } else {
         "explicit_request".to_string()
     };
-    let (policy_mode, policy_reason) =
-        classify_divergence_policy(&user_text, &intent, &route_target);
+    let (policy_mode, policy_reason) = classify_divergence_policy(&user_text);
 
     json!({
         "ok": true,
         "gateway": "coordinator_mcp",
-        "intent": intent,
-        "requested_agent": requested_agent,
-        "route_target": route_target,
+        "intent": intent.as_str(),
+        "requested_agent": requested_agent.map(|agent| agent.as_str()).unwrap_or(""),
+        "route_target": route_target.as_str(),
         "reason": reason,
         "divergence_policy": build_divergence_policy(policy_mode, policy_reason, ""),
     })
@@ -1601,16 +1469,63 @@ mod tests {
     }
 
     #[test]
-    fn route_intake_prefers_intent_when_no_explicit_agent() {
-        let payload = route_intake(json!({
-            "user_text": "prepare a macro brief",
-            "requested_agent": ""
-        }));
+    fn route_intake_matches_the_shared_action_classifier() {
+        let cases = [
+            ("review this API change", "review", "reviewer"),
+            ("ตรวจงานนี้ให้หน่อย", "review", "reviewer"),
+            ("audit the permission boundary", "audit", "auditor"),
+            ("ช่วยตรวจสอบอิสระเรื่องสิทธิ์", "audit", "auditor"),
+            ("fix the market data parser", "engineering", "engineer"),
+            ("ช่วยแก้บั๊กระบบเทรด", "engineering", "engineer"),
+            ("market macro crypto portfolio", "general", "coordinator"),
+            ("trading research strategy", "general", "coordinator"),
+            ("review and audit this evidence", "general", "coordinator"),
+        ];
 
-        assert_eq!(payload["ok"], true);
-        assert_eq!(payload["route_target"], "reviewer");
-        assert_eq!(payload["intent"], "intel");
-        assert_eq!(payload["divergence_policy"]["mode"], "exempt");
+        for (user_text, expected_intent, expected_agent) in cases {
+            let payload = route_intake(json!({
+                "user_text": user_text,
+                "requested_agent": ""
+            }));
+
+            assert_eq!(payload["ok"], true, "user_text={user_text}");
+            assert_eq!(payload["intent"], expected_intent, "user_text={user_text}");
+            assert_eq!(
+                payload["route_target"], expected_agent,
+                "user_text={user_text}"
+            );
+            assert_eq!(
+                payload["intent"],
+                classify_intent(user_text).as_str(),
+                "user_text={user_text}"
+            );
+        }
+    }
+
+    #[test]
+    fn route_intake_explicit_active_agent_wins_and_inactive_agent_falls_back() {
+        for requested_agent in ["reviewer", "auditor", "engineer", "coordinator"] {
+            let payload = route_intake(json!({
+                "user_text": "fix the market data parser",
+                "requested_agent": requested_agent,
+            }));
+
+            assert_eq!(payload["intent"], "engineering");
+            assert_eq!(payload["route_target"], requested_agent);
+            assert_eq!(payload["reason"], "explicit_request");
+        }
+
+        for requested_agent in ["aurora", "unknown"] {
+            let payload = route_intake(json!({
+                "user_text": "audit the permission boundary",
+                "requested_agent": requested_agent,
+            }));
+
+            assert_eq!(payload["intent"], "audit");
+            assert_eq!(payload["route_target"], "auditor");
+            assert_eq!(payload["requested_agent"], "");
+            assert_eq!(payload["reason"], "intent:audit");
+        }
     }
 
     #[test]
