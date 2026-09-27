@@ -310,22 +310,52 @@ pub fn resolve_mcp_port(agent_id: &str) -> Option<u16> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Intent {
-    Intel,
-    Research,
-    Trading,
+    #[serde(alias = "intel")]
+    Review,
+    #[serde(alias = "research")]
+    Audit,
     Engineering,
+    #[serde(alias = "trading")]
     General,
 }
 
 impl Intent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Intent::Review => "review",
+            Intent::Audit => "audit",
+            Intent::Engineering => "engineering",
+            Intent::General => "general",
+        }
+    }
+
     pub fn to_agent(self) -> AgentId {
         match self {
-            Intent::Intel => AgentId::Reviewer,
-            Intent::Research => AgentId::Auditor,
-            Intent::Trading => AgentId::Coordinator,
+            Intent::Review => AgentId::Reviewer,
+            Intent::Audit => AgentId::Auditor,
             Intent::Engineering => AgentId::Engineer,
             Intent::General => AgentId::Coordinator,
         }
+    }
+}
+
+impl std::str::FromStr for Intent {
+    type Err = ();
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "review" | "intel" => Ok(Intent::Review),
+            "audit" | "research" => Ok(Intent::Audit),
+            "engineering" => Ok(Intent::Engineering),
+            "general" | "trading" => Ok(Intent::General),
+            _ => Err(()),
+        }
+    }
+}
+
+impl fmt::Display for Intent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -553,11 +583,31 @@ mod tests {
     }
     #[test]
     fn intent_to_agent_routing() {
-        assert_eq!(Intent::Intel.to_agent(), AgentId::Reviewer);
-        assert_eq!(Intent::Research.to_agent(), AgentId::Auditor);
-        assert_eq!(Intent::Trading.to_agent(), AgentId::Coordinator);
+        assert_eq!(Intent::Review.to_agent(), AgentId::Reviewer);
+        assert_eq!(Intent::Audit.to_agent(), AgentId::Auditor);
         assert_eq!(Intent::Engineering.to_agent(), AgentId::Engineer);
         assert_eq!(Intent::General.to_agent(), AgentId::Coordinator);
+    }
+
+    #[test]
+    fn intent_legacy_inputs_canonicalize_on_parse_and_deserialize() {
+        let cases = [
+            ("intel", Intent::Review, "review"),
+            ("research", Intent::Audit, "audit"),
+            ("trading", Intent::General, "general"),
+        ];
+
+        for (legacy, expected, canonical) in cases {
+            assert_eq!(legacy.parse::<Intent>(), Ok(expected));
+            let deserialized: Intent =
+                serde_json::from_str(&format!("\"{legacy}\"")).expect("legacy intent parses");
+            assert_eq!(deserialized, expected);
+            assert_eq!(
+                serde_json::to_string(&deserialized).unwrap(),
+                format!("\"{canonical}\"")
+            );
+            assert_eq!(deserialized.as_str(), canonical);
+        }
     }
 
     #[test]
