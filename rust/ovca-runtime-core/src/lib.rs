@@ -94,77 +94,37 @@ pub const SNAPSHOT_SCHEMA_VERSION: &str = "oracle_runtime_guard_snapshot.v1";
 const EVENTS_RELATIVE_PATH: &str = "logs/runtime_guard/events.jsonl";
 const SNAPSHOT_RELATIVE_PATH: &str = "logs/runtime_guard/latest.json";
 
-const INTEL_KEYWORDS: &[&str] = &[
-    "market",
-    "macro",
-    "geopolitics",
-    "fed",
-    "inflation",
-    "rate",
-    "regime",
-    "stocks",
-    "equity",
-    "crypto",
-    "gold",
-    "oil",
-    "ตลาด",
-    "หุ้น",
-    "เศรษฐกิจ",
-    "เงินเฟ้อ",
-    "ดอกเบี้ย",
+const REVIEW_ACTION_MARKERS: &[&str] = &["review", "critique", "ตรวจงาน", "รีวิว", "ทบทวนงาน"];
+
+const AUDIT_ACTION_MARKERS: &[&str] = &[
+    "audit",
+    "cross-check",
+    "cross check",
+    "independent verification",
+    "independently verify",
+    "ตรวจสอบอิสระ",
+    "ตรวจสอบแบบอิสระ",
+    "สอบทานอิสระ",
 ];
 
-const RESEARCH_KEYWORDS: &[&str] = &[
-    "hypothesis",
-    "backtest",
-    "strategy",
-    "edge",
-    "research",
-    "statistical",
-    "correlation",
-    "robustness",
-    "วิจัย",
-    "ทดสอบ",
-    "สมมติฐาน",
-    "กลยุทธ์",
-];
-
-const TRADING_KEYWORDS: &[&str] = &[
-    "trade",
-    "position",
-    "risk",
-    "entry",
-    "exit",
-    "drawdown",
-    "execution",
-    "order",
-    "พอร์ต",
-    "เทรด",
-    "stop loss",
-    "hedge",
-];
-
-const ENGINEERING_KEYWORDS: &[&str] = &[
-    "script",
-    "code",
-    "bug",
-    "automate",
-    "api",
-    "python",
-    "rust",
+const ENGINEERING_ACTION_MARKERS: &[&str] = &[
+    "implement",
     "fix",
-    "error",
-    "pipeline",
-    "ระบบ",
-    "โค้ด",
-    "ประสิทธิภาพ",
+    "debug",
+    "patch",
+    "refactor",
+    "automate",
+    "แก้บั๊ก",
+    "แก้ bug",
+    "ลงมือแก้",
+    "เขียนโค้ด",
+    "พัฒนาระบบ",
 ];
 
-const INTENT_KEYWORDS: &[(Intent, &[&str])] = &[
-    (Intent::Intel, INTEL_KEYWORDS),
-    (Intent::Research, RESEARCH_KEYWORDS),
-    (Intent::Trading, TRADING_KEYWORDS),
-    (Intent::Engineering, ENGINEERING_KEYWORDS),
+const INTENT_ACTION_MARKERS: &[(Intent, &[&str])] = &[
+    (Intent::Review, REVIEW_ACTION_MARKERS),
+    (Intent::Audit, AUDIT_ACTION_MARKERS),
+    (Intent::Engineering, ENGINEERING_ACTION_MARKERS),
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -345,22 +305,30 @@ pub fn classify_intent(text: &str) -> Intent {
     let low = text.to_lowercase();
     let tokens = tokenize_runtime_text(text);
     let mut best_match = (Intent::General, 0usize);
+    let mut tied = false;
 
-    for (intent, keywords) in INTENT_KEYWORDS {
-        let score = keywords
+    for (intent, markers) in INTENT_ACTION_MARKERS {
+        let score = markers
             .iter()
-            .filter(|keyword| keyword_matches(&low, &tokens, keyword))
+            .filter(|marker| keyword_matches(&low, &tokens, marker))
             .count();
         if score > best_match.1 {
             best_match = (*intent, score);
+            tied = false;
+        } else if score > 0 && score == best_match.1 {
+            tied = true;
         }
     }
 
-    if best_match.1 == 0 {
+    if best_match.1 == 0 || tied {
         Intent::General
     } else {
         best_match.0
     }
+}
+
+pub fn parse_intent(raw: &str) -> Option<Intent> {
+    raw.parse().ok()
 }
 
 pub fn intent_to_agent(intent: Intent) -> AgentId {
@@ -474,34 +442,34 @@ mod tests {
     }
 
     #[test]
-    fn classify_intent_matches_twenty_sample_texts() {
+    fn classify_intent_uses_actions_and_returns_general_for_domains_or_ties() {
         let cases = [
-            ("market macro regime update", Intent::Intel),
-            ("fed inflation path and rate outlook", Intent::Intel),
-            ("crypto gold oil rotation check", Intent::Intel),
-            ("ตลาดหุ้นและเงินเฟ้อคืนนี้", Intent::Intel),
-            ("hypothesis backtest robustness review", Intent::Research),
-            ("research strategy edge validation", Intent::Research),
-            ("statistical correlation regime test", Intent::Research),
-            ("วิจัยสมมติฐานกลยุทธ์ใหม่", Intent::Research),
-            ("trade position risk review", Intent::Trading),
-            ("entry exit order execution plan", Intent::Trading),
-            ("drawdown hedge stop loss check", Intent::Trading),
-            ("พอร์ตเทรดต้องลดความเสี่ยง", Intent::Trading),
-            ("python api bug in pipeline", Intent::Engineering),
-            ("rust code fix for error handling", Intent::Engineering),
-            ("automate script for system task", Intent::Engineering),
-            ("ระบบโค้ดมีปัญหาประสิทธิภาพ", Intent::Engineering),
+            ("review this API change", Intent::Review),
+            ("ตรวจงานนี้ให้หน่อย", Intent::Review),
+            ("audit the permission boundary", Intent::Audit),
+            ("ช่วยตรวจสอบอิสระเรื่องสิทธิ์", Intent::Audit),
+            ("fix the market data parser", Intent::Engineering),
+            ("ช่วยแก้บั๊กระบบเทรด", Intent::Engineering),
+            ("market macro stocks crypto portfolio", Intent::General),
+            ("trading research strategy risk finance", Intent::General),
+            ("ตลาด มหภาค หุ้น คริปโท พอร์ต เทรด", Intent::General),
+            ("วิจัย กลยุทธ์ ความเสี่ยง การเงิน", Intent::General),
+            ("review and audit this evidence", Intent::General),
             ("summarize the meeting notes", Intent::General),
-            ("tell me a quick joke", Intent::General),
-            ("owner wants a high level recap", Intent::General),
-            ("ช่วยสรุปเรื่องนี้แบบสั้น", Intent::General),
         ];
 
-        assert_eq!(cases.len(), 20);
         for (text, expected) in cases {
             assert_eq!(classify_intent(text), expected, "text={text}");
         }
+    }
+
+    #[test]
+    fn parse_intent_accepts_legacy_inputs_and_returns_canonical_variants() {
+        assert_eq!(parse_intent("review"), Some(Intent::Review));
+        assert_eq!(parse_intent("intel"), Some(Intent::Review));
+        assert_eq!(parse_intent("research"), Some(Intent::Audit));
+        assert_eq!(parse_intent("trading"), Some(Intent::General));
+        assert_eq!(parse_intent("unknown"), None);
     }
 
     #[test]
