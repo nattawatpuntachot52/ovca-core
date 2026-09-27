@@ -1,0 +1,202 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReviewPacketV1",
+  "description": "Structural wire validation only. Rust ReviewPacketV1::validate and the A05 controller are authoritative for digest, Issue 6, evidence-currentness, actor, and byte bindings.",
+  "x-ovca-schema-role": "structural_wire_only",
+  "x-ovca-semantic-validator": "ovca_types::independent_review::ReviewPacketV1::validate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version", "packet_id", "root_run_id", "run_id", "goal_id", "task_id",
+    "candidate_cycle", "max_repair_cycles", "task", "goal_contract", "completion_evidence",
+    "evidence_catalog", "engineer", "verifier", "reviewer", "reviewer_invocation",
+    "reviewer_invocation_digest", "issue6_state_digest", "logical_plan_digest",
+    "resolved_effect_ledger_digest", "engineer_result_digest", "verifier_replay_plan_digest",
+    "verifier_transcript_digest", "frozen_diff", "verification_bundle",
+    "verification_bundle_record_digest", "evidence_current", "verifier_receipts",
+    "evidence_manifest", "packet_digest"
+  ],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "packet_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "root_run_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "run_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "goal_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "task_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "candidate_cycle": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+    "max_repair_cycles": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+    "prior_run_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "prior_repair_directive_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "task": { "$ref": "#/$defs/task" },
+    "goal_contract": { "$ref": "#/$defs/goalContract" },
+    "completion_evidence": { "$ref": "#/$defs/completionEvidence" },
+    "evidence_catalog": { "type": "array", "items": { "$ref": "#/$defs/evidenceRef" } },
+    "engineer": { "$ref": "foundation_authority.v1.schema.json#/$defs/principalIdentity" },
+    "verifier": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+    "reviewer": { "$ref": "foundation_authority.v1.schema.json#/$defs/principalIdentity" },
+    "reviewer_invocation": { "$ref": "control_plane_role_invocation.v1.schema.json" },
+    "reviewer_invocation_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "issue6_state_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "logical_plan_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "resolved_effect_ledger_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "engineer_result_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "verifier_replay_plan_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "verifier_transcript_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "frozen_diff": { "$ref": "#/$defs/frozenDiff" },
+    "verification_bundle": { "$ref": "verification_bundle.v1.schema.json" },
+    "verification_bundle_record_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+    "evidence_current": { "$ref": "#/$defs/evidenceCurrent" },
+    "verifier_receipts": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/verifierReceipt" } },
+    "evidence_manifest": { "$ref": "#/$defs/evidenceManifest" },
+    "packet_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "candidate_cycle": { "const": 0 } }, "required": ["candidate_cycle"] },
+      "then": { "not": { "anyOf": [{ "required": ["prior_run_id"] }, { "required": ["prior_repair_directive_digest"] }] } },
+      "else": { "required": ["prior_run_id", "prior_repair_directive_digest"] }
+    }
+  ],
+  "$defs": {
+    "nonblank": { "type": "string", "minLength": 1, "pattern": "\\S" },
+    "logicalPath": { "type": "string", "minLength": 1, "pattern": "^(?!.*[\\u0000-\\u001F\\u007F])(?!/)(?!.*\\\\)(?!.*:)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)[^/]+(?:/[^/]+)*(?![\\s\\S])" },
+    "workspaceFile": {
+      "type": "object", "additionalProperties": false,
+      "required": ["logical_path", "sha256", "byte_length"],
+      "properties": {
+        "logical_path": { "$ref": "#/$defs/logicalPath" },
+        "sha256": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+        "byte_length": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "frozenDiff": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contract_version", "logical_path", "after_bytes", "after_file", "issue6_diff_digest", "frozen_diff_digest"],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "logical_path": { "$ref": "#/$defs/logicalPath" },
+        "before_bytes": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 255 } },
+        "after_bytes": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 255 } },
+        "before_file": { "$ref": "#/$defs/workspaceFile" },
+        "after_file": { "$ref": "#/$defs/workspaceFile" },
+        "issue6_diff_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+        "frozen_diff_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" }
+      }
+    },
+    "evidenceCurrent": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bundle_id", "record_digest", "generation", "state_digest"],
+      "properties": {
+        "bundle_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "record_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+        "generation": { "type": "integer", "minimum": 1 },
+        "state_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" }
+      }
+    },
+    "evidenceActor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["actor_id", "role"],
+      "properties": {
+        "actor_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "role": { "enum": ["engineer", "verifier", "reviewer", "auditor"] }
+      }
+    },
+    "manifestEntry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["criterion_kind", "criterion", "evidence_id", "evidence_kind", "producer", "content_digest"],
+      "properties": {
+        "criterion_kind": { "enum": ["acceptance", "verification", "definition_of_done"] },
+        "criterion": { "$ref": "#/$defs/nonblank" },
+        "evidence_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "evidence_kind": { "enum": ["artifact", "document", "test_result", "log", "review", "audit", "external_reference", "other"] },
+        "producer": { "$ref": "#/$defs/evidenceActor" },
+        "content_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" }
+      }
+    },
+    "evidenceManifest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contract_version", "actor", "criteria_namespace", "entries", "manifest_digest"],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "actor": { "$ref": "foundation_authority.v1.schema.json#/$defs/principalIdentity" },
+        "criteria_namespace": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "entries": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/manifestEntry" } },
+        "manifest_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" }
+      }
+    },
+    "task": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contract_version", "id", "goal_id", "outcome", "dependencies", "assigned_role", "resource_keys", "write_keys", "status", "created_at", "updated_at"],
+      "properties": {
+        "contract_version": { "const": 1 }, "id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "goal_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" }, "outcome": { "$ref": "#/$defs/nonblank" },
+        "dependencies": { "type": "array", "items": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" } },
+        "assigned_role": { "enum": ["coordinator", "engineer", "reviewer", "auditor"] },
+        "resource_keys": { "type": "array", "items": { "$ref": "#/$defs/nonblank" } },
+        "write_keys": { "type": "array", "items": { "$ref": "#/$defs/nonblank" } },
+        "status": { "enum": ["pending", "ready", "running", "awaiting_approval", "reviewing", "completed", "failed", "cancelled"] },
+        "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "permissionProfile": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contract_version", "risk_tier", "resource_keys", "write_keys", "approval_required", "review_required", "audit_required"],
+      "properties": {
+        "contract_version": { "const": 1 }, "risk_tier": { "enum": ["r0", "r1", "r2", "r3"] },
+        "resource_keys": { "type": "array", "items": { "$ref": "#/$defs/nonblank" } },
+        "write_keys": { "type": "array", "items": { "$ref": "#/$defs/nonblank" } },
+        "approval_required": { "type": "boolean" }, "review_required": { "type": "boolean" }, "audit_required": { "type": "boolean" }
+      }
+    },
+    "goalContract": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contract_version", "id", "project_id", "objective", "constraints", "acceptance_criteria", "verification_criteria", "permission_profile", "definition_of_done", "completion_precondition", "created_at", "updated_at"],
+      "properties": {
+        "contract_version": { "const": 1 }, "id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "project_id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" }, "objective": { "$ref": "#/$defs/nonblank" },
+        "constraints": { "type": "array", "items": { "$ref": "#/$defs/nonblank" } },
+        "acceptance_criteria": { "type": "array", "items": { "$ref": "#/$defs/nonblank" } },
+        "verification_criteria": { "type": "array", "items": { "$ref": "#/$defs/nonblank" } },
+        "permission_profile": { "$ref": "#/$defs/permissionProfile" },
+        "definition_of_done": { "type": "array", "items": { "$ref": "#/$defs/nonblank" } },
+        "completion_precondition": {
+          "type": "object", "additionalProperties": false,
+          "required": ["contract_version", "minimum_evidence_refs", "require_all_acceptance_criteria", "require_all_verification_criteria"],
+          "properties": { "contract_version": { "const": 1 }, "minimum_evidence_refs": { "type": "integer", "minimum": 0 }, "require_all_acceptance_criteria": { "type": "boolean" }, "require_all_verification_criteria": { "type": "boolean" } }
+        },
+        "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "completionEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contract_version", "evidence_refs", "satisfied_acceptance_criteria", "satisfied_verification_criteria", "satisfied_definition_of_done"],
+      "properties": {
+        "contract_version": { "const": 1 }, "evidence_refs": { "type": "array", "items": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" } },
+        "satisfied_acceptance_criteria": { "type": "array", "items": { "$ref": "#/$defs/nonblank" } },
+        "satisfied_verification_criteria": { "type": "array", "items": { "$ref": "#/$defs/nonblank" } },
+        "satisfied_definition_of_done": { "type": "array", "items": { "$ref": "#/$defs/nonblank" } }
+      }
+    },
+    "evidenceRef": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contract_version", "id", "kind", "reference", "producer_role", "produced_at"],
+      "properties": {
+        "contract_version": { "const": 1 }, "id": { "$ref": "foundation_authority.v1.schema.json#/$defs/stableId" },
+        "kind": { "enum": ["artifact", "document", "test_result", "log", "review", "audit", "external_reference", "other"] },
+        "reference": { "$ref": "#/$defs/nonblank" }, "producer_role": { "enum": ["coordinator", "engineer", "reviewer", "auditor"] },
+        "integrity": { "type": "object" }, "produced_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "verifierReceipt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sequence", "command_digest", "executable_digest", "termination", "exit_code", "stdout_sha256", "stderr_sha256", "stdout_bytes", "stderr_bytes"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 0 }, "command_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+        "executable_digest": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+        "termination": { "enum": ["completed", "timeout", "output_limit", "invalid"] }, "exit_code": { "type": ["integer", "null"] },
+        "stdout_sha256": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" }, "stderr_sha256": { "$ref": "foundation_authority.v1.schema.json#/$defs/sha256Digest" },
+        "stdout_bytes": { "type": "integer", "minimum": 0 }, "stderr_bytes": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

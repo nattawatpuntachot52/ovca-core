@@ -279,6 +279,15 @@ pub fn validate_review_decision(
     })
 }
 
+/// Validates the goal, completion claim, and evidence catalog before any
+/// independent role invocation consumes them.
+pub fn validate_review_evidence_context(
+    context: &ReviewDecisionValidationContext<'_>,
+) -> Result<(), ReviewAuditError> {
+    let catalog = validate_context(context)?;
+    validate_completion_catalog(context.completion_evidence, &catalog)
+}
+
 /// Validates an Auditor decision against one exact validated review and evidence set.
 ///
 /// Auditor assessments independently countercheck the completion claim. The

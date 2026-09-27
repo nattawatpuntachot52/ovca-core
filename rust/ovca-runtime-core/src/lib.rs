@@ -14,6 +14,7 @@ pub mod engineer_verifier;
 pub mod execution_lifecycle;
 pub mod finalization;
 pub mod guardrails;
+pub mod independent_review;
 pub mod local_verification_completion;
 pub mod replay;
 pub mod review_audit;
@@ -48,6 +49,13 @@ pub use execution_lifecycle::{
 };
 pub use finalization::{FinalizationError, FinalizationKernel};
 pub use guardrails::{evaluate_guard_request, GuardEvaluationContext};
+pub use independent_review::{
+    audit_execution_request, completed_result, review_execution_request, typed_audit_verdict,
+    typed_review_verdict, IndependentCallStateV1, IndependentReviewError,
+    IndependentReviewExecutor, IndependentReviewPhaseV1, IndependentReviewResolutionV1,
+    IndependentReviewStateV1, IndependentRoleExecutionRequest, IndependentRolePacketV1,
+    OwnerEscalationReasonV1,
+};
 pub use local_verification_completion::{
     admit_local_verification_completion, completion_environment_names, completion_evidence_keys,
     validate_local_verification_completion_contract, validate_persisted_completion_material,
@@ -57,9 +65,9 @@ pub use local_verification_completion::{
 pub use replay::{replay_run, validate_event_chain, ReplayError, ReplayedRun};
 pub use review_audit::{
     derive_review_audit_policy, evaluate_review_audit, validate_audit_decision,
-    validate_review_decision, AuditDecisionValidationContext, ReviewAuditError,
-    ReviewAuditEvaluationContext, ReviewAuditPolicy, ReviewDecisionValidationContext,
-    ValidatedAuditDecision, ValidatedReviewDecision,
+    validate_review_decision, validate_review_evidence_context, AuditDecisionValidationContext,
+    ReviewAuditError, ReviewAuditEvaluationContext, ReviewAuditPolicy,
+    ReviewDecisionValidationContext, ValidatedAuditDecision, ValidatedReviewDecision,
 };
 pub use role_executor::{
     DeterministicFakeRoleExecutor, RoleExecutionOutcome, RoleExecutionRequest, RoleExecutionScript,
@@ -69,8 +77,8 @@ pub use scheduler::{schedule_tasks, ScheduleError};
 pub use sqlite_execution::{
     DurableCommandResult, DurableExecutionAuthority, DurableExecutionError,
     EngineerVerifierCasOutcome, ExecutionRunEnvelope, ExecutionStateCorruption,
-    InitializeRunResult, LoadedExecutionRun, WorkspaceRecoveryClaim,
-    DEFAULT_EXECUTION_CAS_RETRY_LIMIT,
+    IndependentReviewCasOutcome, InitializeRunResult, LoadedExecutionRun, WorkspaceRecoveryClaim,
+    DEFAULT_EXECUTION_CAS_RETRY_LIMIT, EXECUTION_ENVELOPE_V1, EXECUTION_ENVELOPE_V2,
 };
 pub use workspace_capability::{
     BrokerClock, CleanupReason, PreparedWorkspaceState, SystemBrokerClock, ToolExecutionResult,

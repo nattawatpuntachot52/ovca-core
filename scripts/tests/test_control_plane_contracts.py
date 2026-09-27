@@ -77,6 +77,9 @@ TOOL_BOUNDARY_PAIRS = {
 RESOURCE_PATHS = (
     CONTRACTS / "foundation_authority.v1.schema.json",
     CONTRACTS / "foundation_event_envelope.v1.schema.json",
+    CONTRACTS / "audit_packet.v1.schema.json",
+    CONTRACTS / "review_packet.v1.schema.json",
+    CONTRACTS / "verification_bundle.v1.schema.json",
     *(schema for schema, _ in SCHEMA_SAMPLE_PAIRS.values()),
     *(schema for schema, _ in TOOL_BOUNDARY_PAIRS.values()),
 )

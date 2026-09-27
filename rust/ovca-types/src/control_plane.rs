@@ -10,8 +10,8 @@ use crate::foundation::{
     FoundationValidityStatusV1, PrincipalIdentityV1, PrincipalV1,
 };
 use crate::goal_runtime::{
-    verification_sha256_hex, ContractVersion, CoordinatorFinalResponse, EvidenceId, IdempotencyKey,
-    RetryBudget, Role, RunId, SpecialistOutput, TaskId,
+    verification_sha256_hex, AuditDecision, ContractVersion, CoordinatorFinalResponse, EvidenceId,
+    IdempotencyKey, RetryBudget, ReviewDecision, Role, RunId, SpecialistOutput, TaskId,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -202,16 +202,53 @@ impl ControlPlaneState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RoleResultPayloadV1 {
-    Specialist { summary: String },
-    OwnerFinal { response: String },
-    Failure { code: String, message: String },
-    Cancellation { reason: String },
+    Specialist {
+        summary: String,
+    },
+    Reviewer {
+        packet_digest: String,
+        decision: ReviewDecision,
+    },
+    Auditor {
+        packet_digest: String,
+        decision: AuditDecision,
+    },
+    OwnerFinal {
+        response: String,
+    },
+    Failure {
+        code: String,
+        message: String,
+    },
+    Cancellation {
+        reason: String,
+    },
 }
 
 impl RoleResultPayloadV1 {
     fn validate(&self) -> Result<(), ControlPlaneValidationError> {
         match self {
             Self::Specialist { summary } => validate_text(summary, "summary"),
+            Self::Reviewer {
+                packet_digest,
+                decision,
+            } => {
+                validate_sha256_digest(packet_digest, "reviewer.packet_digest")?;
+                if decision.producer_role != Role::Reviewer {
+                    return Err(ControlPlaneValidationError::InvalidResultPayload);
+                }
+                Ok(())
+            }
+            Self::Auditor {
+                packet_digest,
+                decision,
+            } => {
+                validate_sha256_digest(packet_digest, "auditor.packet_digest")?;
+                if decision.producer_role != Role::Auditor {
+                    return Err(ControlPlaneValidationError::InvalidResultPayload);
+                }
+                Ok(())
+            }
             Self::OwnerFinal { response } => validate_text(response, "response"),
             Self::Failure { code, message } => {
                 validate_stable_id(code, "failure.code")?;
@@ -737,6 +774,14 @@ fn validate_result_payload(
             ControlPlaneState::Completed,
             PrincipalV1::Engineer | PrincipalV1::Reviewer | PrincipalV1::Auditor,
             RoleResultPayloadV1::Specialist { .. },
+        ) | (
+            ControlPlaneState::Completed,
+            PrincipalV1::Reviewer,
+            RoleResultPayloadV1::Reviewer { .. },
+        ) | (
+            ControlPlaneState::Completed,
+            PrincipalV1::Auditor,
+            RoleResultPayloadV1::Auditor { .. },
         ) | (
             ControlPlaneState::Failed,
             _,

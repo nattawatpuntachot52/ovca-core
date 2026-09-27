@@ -6,6 +6,7 @@ use crate::execution_lifecycle::{
     ExecutionLifecycleKernel, ExecutionLifecycleRestoreError, ExecutionLifecycleSnapshot,
     FailureRequest, HeartbeatRequest,
 };
+use crate::independent_review::{IndependentReviewError, IndependentReviewStateV1};
 use crate::workspace_capability::{
     workspace_effect_coordinator, WorkspaceEffectCoordinator, WorkspaceEffectGuard,
     WorkspaceRecoveryPermit,
@@ -26,6 +27,8 @@ use std::io;
 use std::path::PathBuf;
 
 pub const DEFAULT_EXECUTION_CAS_RETRY_LIMIT: usize = 16;
+pub const EXECUTION_ENVELOPE_V1: ContractVersion = ContractVersion(1);
+pub const EXECUTION_ENVELOPE_V2: ContractVersion = ContractVersion(2);
 const EXECUTION_ENTITY_PREFIX: &str = "execution_run:";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,11 +40,13 @@ pub struct ExecutionRunEnvelope {
     pub snapshot: ExecutionLifecycleSnapshot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engineer_verifier: Option<EngineerVerifierStateV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub independent_review: Option<Box<IndependentReviewStateV1>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedExecutionRun {
-    pub envelope: ExecutionRunEnvelope,
+    pub envelope: Box<ExecutionRunEnvelope>,
     pub revision: u64,
 }
 
@@ -71,6 +76,13 @@ pub enum EngineerVerifierCasOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndependentReviewCasOutcome {
+    Applied(LoadedExecutionRun),
+    Unchanged(LoadedExecutionRun),
+    Conflict(LoadedExecutionRun),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionStateCorruption {
     UnsupportedEnvelopeVersion {
         expected: ContractVersion,
@@ -81,6 +93,8 @@ pub enum ExecutionStateCorruption {
         actual: RunId,
     },
     EngineerVerifier(EngineerVerifierError),
+    IndependentReview(IndependentReviewError),
+    EnvelopeProjectionVersionMismatch,
     Lifecycle(ExecutionLifecycleRestoreError),
 }
 
@@ -103,6 +117,7 @@ pub enum DurableExecutionError {
     },
     Lifecycle(ExecutionLifecycleError),
     EngineerVerifier(EngineerVerifierError),
+    IndependentReview(IndependentReviewError),
     Storage(VersionedStateError),
     WorkspaceCoordination(io::Error),
     Serialization(serde_json::Error),
@@ -132,6 +147,9 @@ impl fmt::Display for DurableExecutionError {
             Self::EngineerVerifier(source) => {
                 write!(formatter, "engineer-verifier command rejected: {source}")
             }
+            Self::IndependentReview(source) => {
+                write!(formatter, "independent-review command rejected: {source}")
+            }
             Self::Storage(source) => write!(formatter, "execution storage failed: {source}"),
             Self::WorkspaceCoordination(source) => {
                 write!(formatter, "workspace effect coordination failed: {source}")
@@ -159,6 +177,7 @@ impl std::error::Error for DurableExecutionError {
         match self {
             Self::Lifecycle(source) => Some(source),
             Self::EngineerVerifier(source) => Some(source),
+            Self::IndependentReview(source) => Some(source),
             Self::Storage(source) => Some(source),
             Self::WorkspaceCoordination(source) => Some(source),
             Self::Serialization(source) => Some(source),
@@ -236,6 +255,7 @@ impl DurableExecutionAuthority {
             retry_budget,
             snapshot: kernel.snapshot(),
             engineer_verifier: None,
+            independent_review: None,
         };
         restore_kernel(&run_id, &envelope)?;
         let payload = serde_json::to_vec(&envelope)?;
@@ -380,6 +400,64 @@ impl DurableExecutionAuthority {
                 decode_and_restore(run_id, state)?,
             )),
             CompareAndSwapOutcome::Conflict(state) => Ok(EngineerVerifierCasOutcome::Conflict(
+                decode_and_restore(run_id, state)?,
+            )),
+        }
+    }
+
+    /// Atomically installs or advances A05 in the existing execution row.
+    /// The first successful install upgrades the envelope from V1 to V2.
+    pub fn compare_and_swap_independent_review(
+        &self,
+        run_id: &RunId,
+        expected_revision: u64,
+        expected_state_digest: Option<&str>,
+        next: IndependentReviewStateV1,
+    ) -> Result<IndependentReviewCasOutcome, DurableExecutionError> {
+        next.validate()
+            .map_err(DurableExecutionError::IndependentReview)?;
+        let current = self.store.load(&entity_key(run_id))?.ok_or_else(|| {
+            DurableExecutionError::RunNotFound {
+                run_id: run_id.clone(),
+            }
+        })?;
+        let loaded = decode_and_restore(run_id, current)?;
+        if loaded.revision != expected_revision
+            || loaded
+                .envelope
+                .independent_review
+                .as_ref()
+                .map(|state| state.state_digest.as_str())
+                != expected_state_digest
+        {
+            return Ok(IndependentReviewCasOutcome::Conflict(loaded));
+        }
+        validate_independent_review_binding(&loaded.envelope, &next)
+            .map_err(DurableExecutionError::IndependentReview)?;
+        if loaded.envelope.independent_review.as_deref() == Some(&next) {
+            return Ok(IndependentReviewCasOutcome::Unchanged(loaded));
+        }
+        match loaded.envelope.independent_review.as_ref() {
+            Some(previous) => previous
+                .validate_successor(&next)
+                .map_err(DurableExecutionError::IndependentReview)?,
+            None => next
+                .validate_initial_install()
+                .map_err(DurableExecutionError::IndependentReview)?,
+        }
+        let mut next_envelope = loaded.envelope;
+        next_envelope.contract_version = EXECUTION_ENVELOPE_V2;
+        next_envelope.independent_review = Some(Box::new(next));
+        restore_kernel(run_id, &next_envelope)?;
+        let payload = serde_json::to_vec(&next_envelope)?;
+        match self
+            .store
+            .compare_and_swap(&entity_key(run_id), expected_revision, payload)?
+        {
+            CompareAndSwapOutcome::Applied(state) => Ok(IndependentReviewCasOutcome::Applied(
+                decode_and_restore(run_id, state)?,
+            )),
+            CompareAndSwapOutcome::Conflict(state) => Ok(IndependentReviewCasOutcome::Conflict(
                 decode_and_restore(run_id, state)?,
             )),
         }
@@ -555,8 +633,7 @@ fn entity_key(run_id: &RunId) -> String {
 }
 
 fn same_definition(left: &ExecutionRunEnvelope, right: &ExecutionRunEnvelope) -> bool {
-    left.contract_version == right.contract_version
-        && left.run_id == right.run_id
+    left.run_id == right.run_id
         && left.tasks == right.tasks
         && left.retry_budget == right.retry_budget
 }
@@ -568,7 +645,7 @@ fn decode_and_restore(
     let envelope: ExecutionRunEnvelope = serde_json::from_slice(&state.payload)?;
     restore_kernel(expected_run_id, &envelope)?;
     Ok(LoadedExecutionRun {
-        envelope,
+        envelope: Box::new(envelope),
         revision: state.revision,
     })
 }
@@ -577,13 +654,24 @@ fn restore_kernel(
     expected_run_id: &RunId,
     envelope: &ExecutionRunEnvelope,
 ) -> Result<ExecutionLifecycleKernel, DurableExecutionError> {
-    if envelope.contract_version != GOAL_RUNTIME_CONTRACT_VERSION {
+    if envelope.contract_version != EXECUTION_ENVELOPE_V1
+        && envelope.contract_version != EXECUTION_ENVELOPE_V2
+    {
         return Err(corrupt(
             expected_run_id,
             ExecutionStateCorruption::UnsupportedEnvelopeVersion {
-                expected: GOAL_RUNTIME_CONTRACT_VERSION,
+                expected: EXECUTION_ENVELOPE_V2,
                 actual: envelope.contract_version,
             },
+        ));
+    }
+    if (envelope.contract_version == EXECUTION_ENVELOPE_V1 && envelope.independent_review.is_some())
+        || (envelope.contract_version == EXECUTION_ENVELOPE_V2
+            && envelope.independent_review.is_none())
+    {
+        return Err(corrupt(
+            expected_run_id,
+            ExecutionStateCorruption::EnvelopeProjectionVersionMismatch,
         ));
     }
     if envelope.run_id != *expected_run_id {
@@ -606,6 +694,20 @@ fn restore_kernel(
             corrupt(
                 expected_run_id,
                 ExecutionStateCorruption::EngineerVerifier(source),
+            )
+        })?;
+    }
+    if let Some(state) = &envelope.independent_review {
+        state.validate().map_err(|source| {
+            corrupt(
+                expected_run_id,
+                ExecutionStateCorruption::IndependentReview(source),
+            )
+        })?;
+        validate_independent_review_binding(envelope, state).map_err(|source| {
+            corrupt(
+                expected_run_id,
+                ExecutionStateCorruption::IndependentReview(source),
             )
         })?;
     }
@@ -633,6 +735,92 @@ fn validate_engineer_verifier_binding(
         || state.plan.invocation.budget.max_attempts != envelope.retry_budget.max_attempts
     {
         return Err(EngineerVerifierError::InvalidBinding);
+    }
+    Ok(())
+}
+
+fn validate_independent_review_binding(
+    envelope: &ExecutionRunEnvelope,
+    state: &IndependentReviewStateV1,
+) -> Result<(), IndependentReviewError> {
+    use crate::engineer_verifier::{EngineerVerifierPhaseV1, VerifierExecutionStateV1};
+
+    let packet = &state.review_packet;
+    let task = envelope
+        .tasks
+        .get(&packet.task_id)
+        .ok_or(IndependentReviewError::InvalidState)?;
+    let issue6 = envelope
+        .engineer_verifier
+        .as_ref()
+        .ok_or(IndependentReviewError::InvalidState)?;
+    let bridge = issue6
+        .workspace_bridge
+        .as_ref()
+        .ok_or(IndependentReviewError::InvalidState)?;
+    let replay = issue6
+        .verifier_replay_plan
+        .as_ref()
+        .ok_or(IndependentReviewError::InvalidState)?;
+    let workspace = issue6
+        .workspace
+        .as_ref()
+        .ok_or(IndependentReviewError::InvalidState)?;
+    let VerifierExecutionStateV1::Admitted {
+        transcript,
+        transcript_digest,
+        bundle,
+        bundle_record_digest,
+        evidence_current,
+        ..
+    } = issue6
+        .verifier
+        .as_ref()
+        .ok_or(IndependentReviewError::InvalidState)?
+    else {
+        return Err(IndependentReviewError::InvalidState);
+    };
+    if issue6.phase != EngineerVerifierPhaseV1::Reviewing
+        || packet.run_id != envelope.run_id
+        || packet.goal_id != task.goal_id
+        || packet.task != *task
+        || packet.issue6_state_digest != issue6.state_digest
+        || packet.logical_plan_digest != issue6.plan.logical_plan_digest
+        || packet.resolved_effect_ledger_digest != issue6.ledger.resolved_effect_ledger_digest
+        || Some(&packet.engineer_result_digest) != issue6.engineer_result_digest.as_ref()
+        || packet.verifier_replay_plan_digest != replay.replay_plan_digest
+        || packet.verifier_transcript_digest != *transcript_digest
+        || packet.frozen_diff.issue6_diff_digest != bridge.canonical_diff_digest
+        || packet.verification_bundle != *bundle
+        || packet.verification_bundle_record_digest != *bundle_record_digest
+        || packet.evidence_current.bundle_id != evidence_current.bundle_id
+        || packet.evidence_current.record_digest != evidence_current.record_digest
+        || packet.evidence_current.generation != evidence_current.token.generation
+        || packet.evidence_current.state_digest != evidence_current.token.state_digest
+        || packet.engineer != issue6.plan.invocation.target
+        || packet.verifier.as_str() != bundle.verifier_actor.as_str()
+        || bridge.changed_paths.len() != 1
+        || bridge.changed_paths[0] != packet.frozen_diff.logical_path
+        || bridge.before_file_identities.len() != 1
+        || bridge.after_file_identities.len() != 1
+        || bridge.before_file_identities[0].file != packet.frozen_diff.before_file
+        || bridge.after_file_identities[0].file.as_ref() != Some(&packet.frozen_diff.after_file)
+        || packet.verifier_receipts != transcript.commands
+        || !workspace
+            .grant
+            .write_paths
+            .contains(&packet.frozen_diff.logical_path)
+        || u64::try_from(packet.frozen_diff.after_bytes.len())
+            .ok()
+            .is_none_or(|length| length > workspace.grant.max_write_bytes)
+        || packet
+            .frozen_diff
+            .before_bytes
+            .as_ref()
+            .and_then(|bytes| u64::try_from(bytes.len()).ok())
+            .is_some_and(|length| length > workspace.grant.max_read_bytes)
+    {
+        return Err(IndependentReviewError::InvalidState);
     }
     Ok(())
 }
@@ -682,6 +870,47 @@ mod tests {
 
     fn run_id() -> RunId {
         RunId::from("run-1")
+    }
+
+    #[test]
+    fn envelope_version_fence_preserves_v1_and_rejects_downgrade_or_erasure() {
+        let directory = TempDir::new().unwrap();
+        let authority = DurableExecutionAuthority::new(directory.path());
+        authority
+            .initialize_run(run_id(), vec![task("a", &[])], budget(2))
+            .unwrap();
+        let loaded = authority.load(&run_id()).unwrap();
+        assert_eq!(loaded.envelope.contract_version, EXECUTION_ENVELOPE_V1);
+        assert!(loaded.envelope.independent_review.is_none());
+        let legacy_bytes = serde_json::to_vec(&loaded.envelope).unwrap();
+        assert!(!String::from_utf8_lossy(&legacy_bytes).contains("independent_review"));
+        let restored_legacy: ExecutionRunEnvelope = serde_json::from_slice(&legacy_bytes).unwrap();
+        restore_kernel(&run_id(), &restored_legacy).unwrap();
+
+        let mut erased = restored_legacy.clone();
+        erased.contract_version = EXECUTION_ENVELOPE_V2;
+        assert!(matches!(
+            restore_kernel(&run_id(), &erased),
+            Err(DurableExecutionError::CorruptState {
+                source: ExecutionStateCorruption::EnvelopeProjectionVersionMismatch,
+                ..
+            })
+        ));
+
+        let review_packet: ovca_types::independent_review::ReviewPacketV1 = serde_json::from_str(
+            include_str!("../../../contracts/samples/review_packet.v1.sample.json"),
+        )
+        .unwrap();
+        let independent_review = IndependentReviewStateV1::initial(review_packet, at(1)).unwrap();
+        let mut downgraded = restored_legacy;
+        downgraded.independent_review = Some(Box::new(independent_review));
+        assert!(matches!(
+            restore_kernel(&run_id(), &downgraded),
+            Err(DurableExecutionError::CorruptState {
+                source: ExecutionStateCorruption::EnvelopeProjectionVersionMismatch,
+                ..
+            })
+        ));
     }
 
     fn claim_for(

@@ -518,6 +518,7 @@ pub enum ReviewVerdict {
 
 /// Assessment of one exact goal criterion using external evidence references.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CriterionAssessment {
     pub contract_version: ContractVersion,
     pub kind: CriterionKind,
@@ -532,6 +533,7 @@ pub struct CriterionAssessment {
 
 /// Caller-supplied Reviewer decision record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReviewDecision {
     pub contract_version: ContractVersion,
     pub id: ReviewDecisionId,
@@ -549,6 +551,7 @@ pub struct ReviewDecision {
 
 /// Caller-supplied independent Auditor countercheck record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuditDecision {
     pub contract_version: ContractVersion,
     pub id: AuditDecisionId,

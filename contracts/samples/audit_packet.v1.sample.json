@@ -1,0 +1,453 @@
+{
+  "contract_version": 1,
+  "packet_id": "packet.a05.audit",
+  "review_packet": {
+    "contract_version": 1,
+    "packet_id": "packet.a05.review",
+    "root_run_id": "run.a05",
+    "run_id": "run.a05",
+    "goal_id": "goal.a05",
+    "task_id": "task.a05",
+    "candidate_cycle": 0,
+    "max_repair_cycles": 2,
+    "task": {
+      "contract_version": 1,
+      "id": "task.a05",
+      "goal_id": "goal.a05",
+      "outcome": "produce one bounded verified change",
+      "dependencies": [],
+      "assigned_role": "engineer",
+      "resource_keys": [
+        "input.txt"
+      ],
+      "write_keys": [
+        "input.txt"
+      ],
+      "status": "ready",
+      "created_at": "2026-09-21T08:00:00Z",
+      "updated_at": "2026-09-21T09:00:00Z"
+    },
+    "goal_contract": {
+      "contract_version": 1,
+      "id": "goal.a05",
+      "project_id": "project.a05",
+      "objective": "independently review the frozen verified candidate",
+      "constraints": [
+        "read only"
+      ],
+      "acceptance_criteria": [
+        "candidate is correct"
+      ],
+      "verification_criteria": [
+        "verification evidence is current"
+      ],
+      "permission_profile": {
+        "contract_version": 1,
+        "risk_tier": "r3",
+        "resource_keys": [],
+        "write_keys": [
+          "input.txt"
+        ],
+        "approval_required": true,
+        "review_required": true,
+        "audit_required": true
+      },
+      "definition_of_done": [
+        "independent pass pair is durable"
+      ],
+      "completion_precondition": {
+        "contract_version": 1,
+        "minimum_evidence_refs": 1,
+        "require_all_acceptance_criteria": true,
+        "require_all_verification_criteria": true
+      },
+      "created_at": "2026-09-21T08:00:00Z",
+      "updated_at": "2026-09-21T09:00:00Z"
+    },
+    "completion_evidence": {
+      "contract_version": 1,
+      "evidence_refs": [
+        "evidence.a05.verification"
+      ],
+      "satisfied_acceptance_criteria": [
+        "candidate is correct"
+      ],
+      "satisfied_verification_criteria": [
+        "verification evidence is current"
+      ],
+      "satisfied_definition_of_done": [
+        "independent pass pair is durable"
+      ]
+    },
+    "evidence_catalog": [
+      {
+        "contract_version": 1,
+        "id": "evidence.a05.verification",
+        "kind": "test_result",
+        "reference": "evidence-bank://bundle.a05",
+        "producer_role": "engineer",
+        "integrity": {
+          "contract_version": 1,
+          "algorithm": "sha256",
+          "digest": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "produced_at": "2026-09-21T10:00:00Z"
+      }
+    ],
+    "engineer": {
+      "principal_id": "principal.a05.engineer",
+      "role": "engineer"
+    },
+    "verifier": "principal.a05.verifier",
+    "reviewer": {
+      "principal_id": "principal.a05.reviewer",
+      "role": "reviewer"
+    },
+    "reviewer_invocation": {
+      "contract_version": 1,
+      "invocation_id": "invocation.a05.reviewer",
+      "invoker": {
+        "principal_id": "principal.a05.coordinator",
+        "role": "coordinator"
+      },
+      "target": {
+        "principal_id": "principal.a05.reviewer",
+        "role": "reviewer"
+      },
+      "task_id": "task.a05",
+      "run_id": "run.a05",
+      "scope": {
+        "project_id": "project.a05",
+        "goal_id": "goal.a05",
+        "task_id": "task.a05",
+        "run_id": "run.a05"
+      },
+      "budget": {
+        "contract_version": 1,
+        "max_attempts": 1
+      },
+      "idempotency_key": "idempotency.a05.reviewer",
+      "authority": {
+        "contract_version": 1,
+        "authority_id": "authority.a05.reviewer",
+        "principal": {
+          "principal_id": "principal.a05.coordinator",
+          "role": "coordinator"
+        },
+        "scope": {
+          "project_id": "project.a05",
+          "goal_id": "goal.a05",
+          "task_id": "task.a05",
+          "run_id": "run.a05"
+        },
+        "namespace": "code_review",
+        "permission_profile": {
+          "contract_version": 1,
+          "risk_tier": "r3",
+          "resource_keys": [],
+          "write_keys": [],
+          "approval_required": true,
+          "review_required": true,
+          "audit_required": true
+        },
+        "visibility": "role_scoped",
+        "sensitivity": "internal",
+        "validity": {
+          "status": "active",
+          "valid_from": "2026-09-21T08:00:00Z",
+          "valid_until": "2026-09-21T20:00:00Z"
+        }
+      },
+      "authority_digest": "d73431f8cc94c0bb1b59181d623f4371ccfe9a0a6277d64889fe6d8d222fd37b",
+      "input_digest": "b97b0014447726004a8efc97c0919fe76ba38651891b6213c195ffb5cae9d65e",
+      "invoked_at": "2026-09-21T09:00:00Z"
+    },
+    "reviewer_invocation_digest": "d6cdeab276ba40831d8123e8463920223082d17500ffaa09f5d7d16551f5d77b",
+    "issue6_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "logical_plan_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "resolved_effect_ledger_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "engineer_result_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "verifier_replay_plan_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "verifier_transcript_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "frozen_diff": {
+      "contract_version": 1,
+      "logical_path": "input.txt",
+      "before_bytes": [
+        111,
+        108,
+        100,
+        10
+      ],
+      "after_bytes": [
+        110,
+        101,
+        119,
+        10
+      ],
+      "before_file": {
+        "logical_path": "input.txt",
+        "sha256": "01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee",
+        "byte_length": 4
+      },
+      "after_file": {
+        "logical_path": "input.txt",
+        "sha256": "7aa7a5359173d05b63cfd682e3c38487f3cb4f7f1d60659fe59fab1505977d4c",
+        "byte_length": 4
+      },
+      "issue6_diff_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "frozen_diff_digest": "a19f2be127a147cb2a639dafada1b52f582c963624e3abbe317d025f00628039"
+    },
+    "verification_bundle": {
+      "contract_version": 1,
+      "bundle_id": "bundle.a05",
+      "run_id": "run.a05",
+      "goal_id": "goal.a05",
+      "task_id": "task.a05",
+      "behavior_contract_id": "behavior.a05",
+      "capability_ids": [
+        "capability.a05"
+      ],
+      "implementation_actor": "principal.a05.engineer",
+      "verifier_actor": "principal.a05.verifier",
+      "fingerprints": {
+        "source_pre": "3333333333333333333333333333333333333333333333333333333333333333",
+        "source_post": "4444444444444444444444444444444444444444444444444444444444444444",
+        "behavior_contract": "5555555555555555555555555555555555555555555555555555555555555555",
+        "capability_set": "6666666666666666666666666666666666666666666666666666666666666666",
+        "command": "7777777777777777777777777777777777777777777777777777777777777777",
+        "policy": "8888888888888888888888888888888888888888888888888888888888888888",
+        "environment": "9999999999999999999999999999999999999999999999999999999999999999"
+      },
+      "criterion_results": [
+        {
+          "criterion_id": "criterion.a05",
+          "order": 0,
+          "kind": "verification",
+          "text": "verification evidence is current",
+          "verdict": "pass"
+        }
+      ],
+      "failures": [],
+      "verdict": "pass",
+      "created_at": "2026-09-21T10:00:00Z"
+    },
+    "verification_bundle_record_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+    "evidence_current": {
+      "bundle_id": "bundle.a05",
+      "record_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "generation": 1,
+      "state_digest": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "verifier_receipts": [
+      {
+        "sequence": 0,
+        "command_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+        "executable_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+        "termination": "completed",
+        "exit_code": 0,
+        "stdout_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "stderr_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "stdout_bytes": 7,
+        "stderr_bytes": 0
+      }
+    ],
+    "evidence_manifest": {
+      "contract_version": 1,
+      "actor": {
+        "principal_id": "principal.a05.reviewer",
+        "role": "reviewer"
+      },
+      "criteria_namespace": "criteria.a05.review",
+      "entries": [
+        {
+          "criterion_kind": "acceptance",
+          "criterion": "candidate is correct",
+          "evidence_id": "evidence.a05.verification",
+          "evidence_kind": "test_result",
+          "producer": {
+            "actor_id": "principal.a05.engineer",
+            "role": "engineer"
+          },
+          "content_digest": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        {
+          "criterion_kind": "verification",
+          "criterion": "verification evidence is current",
+          "evidence_id": "evidence.a05.verification",
+          "evidence_kind": "test_result",
+          "producer": {
+            "actor_id": "principal.a05.engineer",
+            "role": "engineer"
+          },
+          "content_digest": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        {
+          "criterion_kind": "definition_of_done",
+          "criterion": "independent pass pair is durable",
+          "evidence_id": "evidence.a05.verification",
+          "evidence_kind": "test_result",
+          "producer": {
+            "actor_id": "principal.a05.engineer",
+            "role": "engineer"
+          },
+          "content_digest": "1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      ],
+      "manifest_digest": "9767dbdb79bb172ee4b51a732eda3317ad5e5a7cd61188429bda228fee0b8beb"
+    },
+    "packet_digest": "3c657e271aa49f89f8255caf39141ee2cff2ecd50c2bfdb33de3789008371040"
+  },
+  "review_packet_digest": "3c657e271aa49f89f8255caf39141ee2cff2ecd50c2bfdb33de3789008371040",
+  "review_result_digest": "a5486347f1cc9743561b79d426bcce5b773c496e3ab6d560d05f97b0f2149059",
+  "review_decision": {
+    "contract_version": 1,
+    "id": "review.a05",
+    "run_id": "run.a05",
+    "goal_id": "goal.a05",
+    "producer_role": "reviewer",
+    "verdict": "pass",
+    "assessments": [
+      {
+        "contract_version": 1,
+        "kind": "acceptance",
+        "criterion": "candidate is correct",
+        "verdict": "satisfied",
+        "evidence_refs": [
+          "evidence.a05.verification"
+        ],
+        "rationale": "the bound evidence supports this exact criterion"
+      },
+      {
+        "contract_version": 1,
+        "kind": "verification",
+        "criterion": "verification evidence is current",
+        "verdict": "satisfied",
+        "evidence_refs": [
+          "evidence.a05.verification"
+        ],
+        "rationale": "the bound evidence supports this exact criterion"
+      },
+      {
+        "contract_version": 1,
+        "kind": "definition_of_done",
+        "criterion": "independent pass pair is durable",
+        "verdict": "satisfied",
+        "evidence_refs": [
+          "evidence.a05.verification"
+        ],
+        "rationale": "the bound evidence supports this exact criterion"
+      }
+    ],
+    "summary": "reviewed the exact frozen candidate",
+    "decided_at": "2026-09-21T11:00:00Z"
+  },
+  "auditor": {
+    "principal_id": "principal.a05.auditor",
+    "role": "auditor"
+  },
+  "auditor_invocation": {
+    "contract_version": 1,
+    "invocation_id": "invocation.a05.auditor",
+    "invoker": {
+      "principal_id": "principal.a05.coordinator",
+      "role": "coordinator"
+    },
+    "target": {
+      "principal_id": "principal.a05.auditor",
+      "role": "auditor"
+    },
+    "task_id": "task.a05",
+    "run_id": "run.a05",
+    "scope": {
+      "project_id": "project.a05",
+      "goal_id": "goal.a05",
+      "task_id": "task.a05",
+      "run_id": "run.a05"
+    },
+    "budget": {
+      "contract_version": 1,
+      "max_attempts": 1
+    },
+    "idempotency_key": "idempotency.a05.auditor",
+    "authority": {
+      "contract_version": 1,
+      "authority_id": "authority.a05.auditor",
+      "principal": {
+        "principal_id": "principal.a05.coordinator",
+        "role": "coordinator"
+      },
+      "scope": {
+        "project_id": "project.a05",
+        "goal_id": "goal.a05",
+        "task_id": "task.a05",
+        "run_id": "run.a05"
+      },
+      "namespace": "code_review",
+      "permission_profile": {
+        "contract_version": 1,
+        "risk_tier": "r3",
+        "resource_keys": [],
+        "write_keys": [],
+        "approval_required": true,
+        "review_required": true,
+        "audit_required": true
+      },
+      "visibility": "role_scoped",
+      "sensitivity": "internal",
+      "validity": {
+        "status": "active",
+        "valid_from": "2026-09-21T08:00:00Z",
+        "valid_until": "2026-09-21T20:00:00Z"
+      }
+    },
+    "authority_digest": "12433362d611642cba2ebfd8aa0946458976489b0b8038632fe948d284e3cf09",
+    "input_digest": "5fbe13ee75e696d1c3ba934521a97c8ee73d119300eb404985afa0281441d92e",
+    "invoked_at": "2026-09-21T09:00:00Z"
+  },
+  "auditor_invocation_digest": "530495f28611647d37b03e79d408b1aa39bd8f117877d9a0366d9f597f0b4bb6",
+  "evidence_manifest": {
+    "contract_version": 1,
+    "actor": {
+      "principal_id": "principal.a05.auditor",
+      "role": "auditor"
+    },
+    "criteria_namespace": "criteria.a05.audit",
+    "entries": [
+      {
+        "criterion_kind": "acceptance",
+        "criterion": "candidate is correct",
+        "evidence_id": "evidence.a05.verification",
+        "evidence_kind": "test_result",
+        "producer": {
+          "actor_id": "principal.a05.engineer",
+          "role": "engineer"
+        },
+        "content_digest": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      {
+        "criterion_kind": "verification",
+        "criterion": "verification evidence is current",
+        "evidence_id": "evidence.a05.verification",
+        "evidence_kind": "test_result",
+        "producer": {
+          "actor_id": "principal.a05.engineer",
+          "role": "engineer"
+        },
+        "content_digest": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      {
+        "criterion_kind": "definition_of_done",
+        "criterion": "independent pass pair is durable",
+        "evidence_id": "evidence.a05.verification",
+        "evidence_kind": "test_result",
+        "producer": {
+          "actor_id": "principal.a05.engineer",
+          "role": "engineer"
+        },
+        "content_digest": "1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    ],
+    "manifest_digest": "9b949e2d86c0838e91d86269c14670537f83d9ca0c0d4211e973387bf314217e"
+  },
+  "packet_digest": "e68f8fe9db3a4ad5e654f3ffadf7f1c8ca25d1aaf235ed1b96d83733215fd9b2"
+}
