@@ -18,6 +18,7 @@ ovca-types      = { path = "../ovca-types" }
 ovca-storage    = { path = "../ovca-storage" }
 ovca-mcp        = { path = "../ovca-mcp" }
 ovca-llm-client = { path = "../ovca-llm-client" }
+ovca-runtime-core = { path = "../ovca-runtime-core" }
 axum              = { workspace = true }
 tokio             = { workspace = true }
 serde_json        = { workspace = true }
