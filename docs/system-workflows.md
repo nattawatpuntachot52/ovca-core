@@ -225,7 +225,8 @@ rerouting to another role.
 **Tool:** `coordinator_route_intake`
 
 **What it does:** Validates `user_text`, honors an explicit active-role request,
-or classifies the text into an intent and maps it to a role.
+or classifies the requested action into an intent and maps it to a role. The same
+pure classifier is used by Coordinator and the embeddable LangGraph workflow.
 
 **Why it exists:** The front door needs a deterministic routing explanation before
 any downstream caller decides whether to invoke a specialist.
@@ -236,18 +237,24 @@ any downstream caller decides whether to invoke a specialist.
 
 | Intent | Default route |
 |---|---|
-| `intel` | Reviewer |
-| `research` | Auditor |
-| `trading` | Coordinator |
+| `review` | Reviewer |
+| `audit` | Auditor |
 | `engineering` | Engineer |
 | `general` | Coordinator |
+
+The classifier scores curated English and Thai action markers. A unique positive
+high score selects a specialist; no action match or a tie selects `general`.
+Subject nouns and domain metadata never select a role, so the same workflow can
+route work in any domain. A valid explicit Coordinator, Engineer, Reviewer, or
+Auditor request takes precedence over both local classification and a conflicting
+gateway result.
 
 ```mermaid
 flowchart TD
     Input["user_text and optional requested_agent"] --> Validate{"user_text present?"}
     Validate -->|"No"| Error["Return validation error"]
     Validate -->|"Yes"| Explicit{"Known active role requested?"}
-    Explicit -->|"Yes"| Route["Use explicit role"]
+    Explicit -->|"Yes"| Route["Use explicit role even if gateway differs"]
     Explicit -->|"No"| Classify["Classify intent"]
     Classify --> Route
     Route --> Divergence["Classify divergence policy"]
@@ -531,9 +538,10 @@ flowchart TD
 heuristic, not an independent model judgment. `scripts/ovca.ps1` does not launch a
 LangGraph service; an application must call this library explicitly.
 
-**Failure states:** If Coordinator routing is unavailable, local classification is
-used. If a specialist MCP is offline, the graph records a fallback response and
-the grade/rewrite loop may retry up to the configured limit.
+**Failure states:** If Coordinator routing is unavailable, the same shared local
+classifier is used. Unknown or inactive requested identities fall back to normal
+classification. If a specialist MCP is offline, the graph records a fallback
+response and the grade/rewrite loop may retry up to the configured limit.
 
 **Evidence:** `rust/ovca-langgraph/src/lib.rs`,
 `rust/ovca-runtime-core/src/lib.rs`, `rust/ovca-brain/src/search.rs`
