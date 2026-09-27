@@ -13,8 +13,8 @@ use anyhow::Result;
 use ovca_brain::{search, BrainCache};
 use ovca_llm_client::McpHttpClient;
 use ovca_runtime_core::{
-    classify_intent as runtime_classify_intent, intent_to_agent, resolve_requested_agent,
-    tokenize_runtime_text,
+    classify_intent as runtime_classify_intent, intent_to_agent, parse_intent,
+    resolve_requested_agent, tokenize_runtime_text,
 };
 use ovca_types::{AgentId, AgentState, Intent};
 use serde::{Deserialize, Serialize};
@@ -244,29 +244,14 @@ impl OracleGraph {
         let user_text = state.original_user_text.trim().to_string();
         let requested = resolve_requested_agent(&state.requested_agent);
         let local_intent = (self.classifier)(&user_text);
-        let local_agent = requested.unwrap_or_else(|| intent_to_agent(local_intent));
-
+        let gateway = self.gateway_route(&user_text, requested).await;
         let (intent, gateway_route, gateway_reason, gateway_used) =
-            match self.gateway_route(&user_text, requested).await {
-                Some((gateway_intent, gateway_agent, reason)) => {
-                    (gateway_intent, gateway_agent, reason, true)
-                }
-                None => (
-                    local_intent,
-                    local_agent,
-                    if requested.is_some() {
-                        "explicit_request".to_string()
-                    } else {
-                        format!("intent:{}", intent_name(local_intent))
-                    },
-                    false,
-                ),
-            };
+            select_intake_route(local_intent, requested, gateway);
 
         let (rag_context, capsule_context, retrieval_trace) =
             self.build_context(gateway_route, &user_text).await;
 
-        state.intent = intent_name(intent).to_string();
+        state.intent = intent.as_str().to_string();
         state.current_query = user_text.clone();
         state.gateway_route = gateway_route.as_str().to_string();
         state.gateway_reason = gateway_reason;
@@ -293,20 +278,14 @@ impl OracleGraph {
     }
 
     pub fn route_intake(&self, state: &GraphState) -> AgentId {
-        if let Some(agent) = resolve_requested_agent(&state.gateway_route) {
-            return agent;
-        }
         if let Some(agent) = resolve_requested_agent(&state.requested_agent) {
             return agent;
         }
+        if let Some(agent) = resolve_requested_agent(&state.gateway_route) {
+            return agent;
+        }
 
-        let intent = match state.intent.as_str() {
-            "intel" => Intent::Intel,
-            "research" => Intent::Research,
-            "trading" => Intent::Trading,
-            "engineering" => Intent::Engineering,
-            _ => Intent::General,
-        };
+        let intent = parse_intent(&state.intent).unwrap_or(Intent::General);
         intent_to_agent(intent)
     }
 
@@ -449,26 +428,7 @@ impl OracleGraph {
             return None;
         }
 
-        let result = payload.get("result")?;
-        let intent = match result.get("intent").and_then(Value::as_str).unwrap_or("") {
-            "intel" => Intent::Intel,
-            "research" => Intent::Research,
-            "trading" => Intent::Trading,
-            "engineering" => Intent::Engineering,
-            _ => Intent::General,
-        };
-        let route = resolve_requested_agent(
-            result
-                .get("route_target")
-                .and_then(Value::as_str)
-                .unwrap_or(""),
-        )?;
-        let reason = result
-            .get("reason")
-            .and_then(Value::as_str)
-            .unwrap_or("gateway")
-            .to_string();
-        Some((intent, route, reason))
+        parse_gateway_route_result(payload.get("result")?)
     }
 
     fn route_rewrite_target(&self, state: &GraphState) -> AgentId {
@@ -598,14 +558,52 @@ pub fn grade(response: &str, query: &str) -> GradeResult {
     }
 }
 
-fn intent_name(intent: Intent) -> &'static str {
-    match intent {
-        Intent::Intel => "intel",
-        Intent::Research => "research",
-        Intent::Trading => "trading",
-        Intent::Engineering => "engineering",
-        Intent::General => "general",
+fn select_intake_route(
+    local_intent: Intent,
+    requested_agent: Option<AgentId>,
+    gateway: Option<(Intent, AgentId, String)>,
+) -> (Intent, AgentId, String, bool) {
+    let (intent, route, reason, gateway_used) = match gateway {
+        Some((intent, route, reason)) => (intent, route, reason, true),
+        None => (
+            local_intent,
+            intent_to_agent(local_intent),
+            format!("intent:{}", local_intent.as_str()),
+            false,
+        ),
+    };
+
+    if let Some(explicit) = requested_agent {
+        (
+            intent,
+            explicit,
+            "explicit_request".to_string(),
+            gateway_used,
+        )
+    } else {
+        (intent, route, reason, gateway_used)
     }
+}
+
+fn parse_gateway_route_result(result: &Value) -> Option<(Intent, AgentId, String)> {
+    let intent = parse_intent(result.get("intent").and_then(Value::as_str).unwrap_or(""))
+        .unwrap_or(Intent::General);
+    let route = resolve_requested_agent(
+        result
+            .get("route_target")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    )?;
+    let raw_reason = result
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("gateway");
+    let reason = if raw_reason.starts_with("intent:") {
+        format!("intent:{}", intent.as_str())
+    } else {
+        raw_reason.to_string()
+    };
+    Some((intent, route, reason))
 }
 
 fn specialist_tool(agent: AgentId, query: &str) -> Option<(&'static str, &'static str, Value)> {
@@ -925,7 +923,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn all_five_intent_paths_match_expected_trace() {
+    async fn all_action_intent_paths_match_expected_trace() {
         let dir = TempDir::new().unwrap();
         let responder: Arc<SpecialistOverride> = Arc::new(|agent, state| {
             match agent {
@@ -953,34 +951,40 @@ mod tests {
 
         let cases = [
             (
-                "market macro regime update",
+                "review this API change",
                 None,
+                "review",
                 vec!["intake", "reviewer", "grade", "coordinator"],
             ),
             (
-                "hypothesis backtest robustness review",
+                "audit the permission boundary",
                 None,
+                "audit",
                 vec!["intake", "auditor", "grade", "coordinator"],
             ),
             (
-                "trade position risk review",
+                "fix the market data parser",
                 None,
-                vec!["intake", "coordinator"],
-            ),
-            (
-                "python api bug in pipeline",
-                None,
+                "engineering",
                 vec!["intake", "engineer", "grade", "coordinator"],
             ),
             (
-                "summarize owner meeting notes",
+                "market macro crypto portfolio",
                 None,
+                "general",
+                vec!["intake", "coordinator"],
+            ),
+            (
+                "review and audit this evidence",
+                None,
+                "general",
                 vec!["intake", "coordinator"],
             ),
         ];
 
-        for (message, requested, expected_trace) in cases {
+        for (message, requested, expected_intent, expected_trace) in cases {
             let state = graph.run_detailed(message, requested, "session-1").await;
+            assert_eq!(state.intent, expected_intent, "message={message}");
             assert_eq!(state.execution_trace, expected_trace, "message={message}");
             assert!(!state.final_response.is_empty(), "message={message}");
         }
@@ -993,7 +997,7 @@ mod tests {
             Arc::new(|agent, _state| format!("[fallback:{}] insufficient", agent.as_str()));
         let graph = graph_with_override(dir.path(), responder);
 
-        let mut state = GraphState::new("market macro regime update", None, "rewrite-session");
+        let mut state = GraphState::new("review this API change", None, "rewrite-session");
         state.max_rewrites = 2;
         let state = graph.run_graph(state).await;
 
@@ -1031,18 +1035,68 @@ mod tests {
 
         let result = graph
             .run(
-                "hypothesis backtest robustness review",
+                "audit the permission boundary",
                 Some("auditor"),
                 "graph-session",
             )
             .await;
 
-        assert_eq!(result.intent, "research");
+        assert_eq!(result.intent, "audit");
         assert_eq!(result.active_agent, "auditor");
         assert_eq!(result.gateway_route, "auditor");
         assert_eq!(result.session_id, "graph-session");
         assert!(!result.final_response.is_empty());
         assert!(result.grounded_trace["execution_trace"].is_array());
+    }
+
+    #[test]
+    fn legacy_gateway_intents_are_parsed_and_emitted_canonically() {
+        let cases = [
+            ("intel", "reviewer", Intent::Review, "intent:review"),
+            ("research", "auditor", Intent::Audit, "intent:audit"),
+            ("trading", "coordinator", Intent::General, "intent:general"),
+        ];
+
+        for (legacy, route_target, expected_intent, expected_reason) in cases {
+            let result = json!({
+                "intent": legacy,
+                "route_target": route_target,
+                "reason": format!("intent:{legacy}"),
+            });
+            let (intent, route, reason) =
+                parse_gateway_route_result(&result).expect("valid gateway route");
+
+            assert_eq!(intent, expected_intent);
+            assert_eq!(route.as_str(), route_target);
+            assert_eq!(reason, expected_reason);
+        }
+    }
+
+    #[test]
+    fn explicit_requested_agent_wins_over_conflicting_gateway_and_local_routes() {
+        let selection = select_intake_route(
+            Intent::Engineering,
+            Some(AgentId::Reviewer),
+            Some((Intent::Audit, AgentId::Auditor, "intent:audit".to_string())),
+        );
+
+        assert_eq!(selection.0, Intent::Audit);
+        assert_eq!(selection.1, AgentId::Reviewer);
+        assert_eq!(selection.2, "explicit_request");
+        assert!(selection.3);
+    }
+
+    #[test]
+    fn route_intake_prefers_explicit_agent_over_conflicting_state() {
+        let dir = TempDir::new().unwrap();
+        let responder: Arc<SpecialistOverride> =
+            Arc::new(|agent, _state| format!("{} response", agent.as_str()));
+        let graph = graph_with_override(dir.path(), responder);
+        let mut state = GraphState::new("fix the parser", Some("reviewer"), "route-test");
+        state.intent = "audit".to_string();
+        state.gateway_route = "auditor".to_string();
+
+        assert_eq!(graph.route_intake(&state), AgentId::Reviewer);
     }
 
     #[tokio::test]
@@ -1056,7 +1110,7 @@ mod tests {
             .to_path_buf();
         let graph = OracleGraph::from_env(root).unwrap();
         let result = graph
-            .run("market macro regime update", None, "live-smoke")
+            .run("review this API change", None, "live-smoke")
             .await;
         assert!(!result.final_response.is_empty());
     }

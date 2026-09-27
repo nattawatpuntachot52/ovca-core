@@ -980,6 +980,7 @@ dependencies = [
  "dotenvy",
  "ovca-llm-client",
  "ovca-mcp",
+ "ovca-runtime-core",
  "ovca-storage",
  "ovca-types",
  "serde_json",
